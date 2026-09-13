@@ -1,0 +1,17 @@
+{
+  "private": true,
+  "scripts": {
+    "skyward:login": "tsx src/skyward-login.ts",
+    "skyward:messages": "tsx src/skyward-messages.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "playwright": "^1.63.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}
