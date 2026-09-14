@@ -1,0 +1,7 @@
+{
+  "name": "@schoolhawk/core",
+  "version": "0.0.0",
+  "private": true,
+  "exports": { "./messages": "./schemas/messages.ts" },
+  "dependencies": { "zod": "^4.6.5" }
+}

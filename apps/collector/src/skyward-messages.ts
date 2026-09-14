@@ -1,8 +1,12 @@
 import { chromium, type Page } from "playwright";
-import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile } from "node:fs/promises";
 import path from "node:path";
 import portalConfig from "../../../config/portals.json";
+import type { MessageRun } from "@schoolhawk/core/messages";
+import { encryptRun } from "@schoolhawk/storage/encrypted-runs";
+export { encryptRun, decryptRun } from "@schoolhawk/storage/encrypted-runs";
+export type { CollectedMessage, MessageRun } from "@schoolhawk/core/messages";
 
 const ROOT = path.resolve(__dirname, "../../..");
 const AUTH = path.join(ROOT, "playwright/.auth");
@@ -11,13 +15,38 @@ const ROWS = ".myMessagesVueBrowse .messageCell[data-messageid]";
 const ZONE = "America/Los_Angeles";
 let runStage = "CONFIGURATION";
 
-export function dateWindow(days: number, now = new Date()) {
+class MessageUsageError extends Error {}
+
+export function parseDays(args: string[]): number {
+  if (args.length !== 1 || !/^\d+$/.test(args[0])) {
+    throw new MessageUsageError("Provide exactly one day count. From apps/collector run: npm run skyward:messages -- 7");
+  }
+  const days = Number(args[0]);
+  if (!Number.isInteger(days) || days < 1 || days > 366) {
+    throw new MessageUsageError("N must be an integer between 1 and 366. Example: npm run skyward:messages -- 7");
+  }
+  return days;
+}
+
+export function parseMessageOptions(args: string[]) {
+  const allFlags = args.filter(arg => arg === "--all");
+  if (allFlags.length > 1) throw new MessageUsageError("Use --all at most once. Example: npm run skyward:messages -- 7 --all");
+  return { days: parseDays(args.filter(arg => arg !== "--all")), includeRead: allFlags.length === 1 };
+}
+
+export function dateWindow(days: number, now = new Date()): MessageRun["window"] {
   if (!Number.isInteger(days) || days < 1 || days > 366) {
     throw new Error("N must be an integer between 1 and 366.");
   }
-  const endDate = new Intl.DateTimeFormat("en-CA", {
-    timeZone: ZONE, year: "numeric", month: "2-digit", day: "2-digit",
-  }).format(now);
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: ZONE, calendar: "gregory", numberingSystem: "latn",
+    year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(now);
+  const year = parts.find(part => part.type === "year")?.value;
+  const month = parts.find(part => part.type === "month")?.value;
+  const day = parts.find(part => part.type === "day")?.value;
+  const endDate = `${year}-${month}-${day}`;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(endDate)) throw new Error("Cannot determine Pacific calendar date.");
   const start = new Date(`${endDate}T00:00:00Z`);
   start.setUTCDate(start.getUTCDate() - days + 1);
   return { days, startDate: start.toISOString().slice(0, 10), endDate, timeZone: ZONE };
@@ -41,32 +70,11 @@ export function messageDate(label: string, today: string): string {
   return value;
 }
 
-export interface CollectedMessage {
-  id: string;
-  sender: string;
-  subject: string;
-  sentDate: string;
-  displayedDate: string;
-  unreadBeforeOpen: boolean;
-  bodyText: string;
-  source: { portal: "skyward"; url: string; capturedAt: string };
-}
-
-export interface MessageRun {
-  runId: string;
-  capturedAt: string;
-  window: ReturnType<typeof dateWindow>;
-  status: "complete" | "partial" | "failed";
-  warning?: string;
-  messages: CollectedMessage[];
-  scannedCount: number;
-  parserVersion: 1;
-}
-
-export async function collectMessages(page: Page, days: number, now = new Date(), timeout = 15_000): Promise<MessageRun> {
+export async function collectMessages(page: Page, days: number, now = new Date(), timeout = 15_000, options: { includeRead?: boolean } = {}): Promise<MessageRun> {
   const result: MessageRun = {
     runId: randomUUID(), capturedAt: now.toISOString(), window: dateWindow(days, now),
     status: "failed", messages: [], scannedCount: 0, parserVersion: 1,
+    selection: options.includeRead ? "all" : "unread",
   };
   const seen = new Set<string>();
   let stage = "INBOX_NOT_READY";
@@ -98,6 +106,7 @@ export async function collectMessages(page: Page, days: number, now = new Date()
           crossedBoundary = true;
           continue;
         }
+        if (!options.includeRead && !row.unread) continue;
         stage = "MESSAGE_BODY_UNVERIFIED";
         const cell = page.locator(ROWS).filter({ has: page.locator(".messageCell__subject") });
         const target = await cell.evaluateAll((elements, id) => elements.findIndex(element => element.getAttribute("data-messageid") === id), row.id);
@@ -138,20 +147,6 @@ export async function collectMessages(page: Page, days: number, now = new Date()
   }
 }
 
-export function encryptRun(run: MessageRun, key: Buffer) {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", key, iv);
-  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(run), "utf8"), cipher.final()]);
-  return { version: 1, algorithm: "aes-256-gcm", iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64"), ciphertext: ciphertext.toString("base64") };
-}
-
-export function decryptRun(envelope: ReturnType<typeof encryptRun>, key: Buffer): MessageRun {
-  if (envelope.version !== 1 || envelope.algorithm !== "aes-256-gcm") throw new Error("Unsupported encrypted result.");
-  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(envelope.iv, "base64"));
-  decipher.setAuthTag(Buffer.from(envelope.tag, "base64"));
-  return JSON.parse(Buffer.concat([decipher.update(Buffer.from(envelope.ciphertext, "base64")), decipher.final()]).toString("utf8"));
-}
-
 async function checkPrivate(filePath: string, directory = false) {
   const info = await lstat(filePath);
   if (info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0 ||
@@ -165,9 +160,8 @@ async function writePrivate(filePath: string, data: string | Buffer) {
 
 async function main() {
   process.umask(0o077);
-  const args = process.argv.slice(2);
-  if (args.length !== 1 || !/^\d+$/.test(args[0])) throw new Error("Usage: npm run skyward:messages -- N");
-  const days = Number(args[0]);
+  const { days, includeRead } = parseMessageOptions(process.argv.slice(2));
+  runStage = "DATE_WINDOW";
   dateWindow(days);
   runStage = "PRIVATE_SESSION_FILE";
   await checkPrivate(AUTH, true);
@@ -204,11 +198,11 @@ async function main() {
     await page.goto(entry.href, { waitUntil: "domcontentloaded" });
     runStage = "INBOX_NAVIGATION";
     await page.getByRole("link", { name: /my messages/i }).first().click();
-    const result = await collectMessages(page, days);
+    const result = await collectMessages(page, days, new Date(), 15_000, { includeRead });
     runStage = "ENCRYPTED_RESULT_WRITE";
     const output = path.join(outputDirectory, `${result.runId}.json.enc`);
     await writePrivate(output, JSON.stringify(encryptRun(result, key)));
-    console.log(JSON.stringify({ status: result.status, window: result.window,
+    console.log(JSON.stringify({ status: result.status, selection: result.selection, window: result.window,
       messages: result.messages.length, scanned: result.scannedCount,
       warning: result.warning, output: path.relative(ROOT, output) }, null, 2));
     if (result.status !== "complete") process.exitCode = 1;
@@ -216,7 +210,17 @@ async function main() {
 }
 
 if (require.main === module) {
-  main().catch(() => {
+  main().catch((error: unknown) => {
+    if (error instanceof MessageUsageError) {
+      console.error(`MESSAGES: ${error.message} No login was attempted.`);
+      process.exitCode = 1;
+      return;
+    }
+    if (runStage === "DATE_WINDOW" || runStage === "CONFIGURATION") {
+      console.error(`MESSAGES: Failed at ${runStage} before session access (Node ${process.version}). Check the system clock and Node timezone support. No login was attempted.`);
+      process.exitCode = 1;
+      return;
+    }
     console.error(`MESSAGES: Failed at ${runStage}. Check N (1-366), private storage permissions, and renew the session with skyward:login if needed. No private error details printed.`);
     process.exitCode = 1;
   });

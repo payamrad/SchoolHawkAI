@@ -1,0 +1,17 @@
+{
+  "name": "schoolhawk-ai",
+  "private": true,
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "npm run test --workspaces --if-present",
+    "data": "npm run data --workspace @schoolhawk/cli --",
+    "skyward:login": "npm run skyward:login --workspace @schoolhawk/collector",
+    "skyward:messages": "npm run skyward:messages --workspace @schoolhawk/collector --"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}

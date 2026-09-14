@@ -1,0 +1,7 @@
+{
+  "name": "@schoolhawk/cli",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": { "data": "tsx src/storage.ts" },
+  "dependencies": { "@schoolhawk/storage": "0.0.0" }
+}

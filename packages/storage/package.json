@@ -1,0 +1,21 @@
+{
+  "name": "@schoolhawk/storage",
+  "version": "0.0.0",
+  "private": true,
+  "exports": {
+    "./messages": "./messages.ts",
+    "./sqlite": "./sqlite-message-store.ts",
+    "./encrypted-runs": "./encrypted-runs.ts",
+    "./private-files": "./private-files.ts"
+  },
+  "scripts": { "test": "vitest run" },
+  "dependencies": {
+    "@schoolhawk/core": "0.0.0",
+    "better-sqlite3": "^12.11.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "vite": "^7.3.0",
+    "vitest": "^4.0.0"
+  }
+}

@@ -1,6 +1,7 @@
 # Skyward Login
 
-From this directory, install dependencies with `npm install` and the browser with
+Install dependencies from the repository root using the workspace lockfile (see
+the root README). From this directory, install the browser with
 `npx playwright install chromium`.
 
 In your own Bash terminal, enter credentials without putting them in shell history:
@@ -52,6 +53,19 @@ verify your real credentials.
 npm run skyward:messages -- 7
 ```
 
+By default, only messages observed as unread in the requested date window are
+opened and collected. To include read messages as well:
+
+```bash
+npm run skyward:messages -- 7 --all
+```
+
+Both modes scan list metadata for date coverage; `--all` does not remove the
+date limit. The output summary and encrypted run include `selection` (`unread`
+or `all`). Older saved runs without this field used all-message collection.
+A complete unread-only run with zero messages means no matching unread messages
+were found, not that the inbox contains no messages.
+
 N is an integer from 1 to 366. It includes today and the preceding N-1 calendar
 days in `America/Los_Angeles`, not the previous N times 24 hours. For example,
 on September 13, 2026, N=7 covers September 7 through September 13 inclusive.
@@ -62,6 +76,13 @@ This collector opens messages, with the parent's explicit approval that doing so
 may mark them read or send receipts. Desktop preview behavior may also change
 read status. It does not reply, delete, submit forms, or download attachments.
 Use only with accounts where those read side effects are approved.
+
+Unread-only selection does not preserve unread status: opening an unread message
+can mark it read. Automatic previews may also change status before it is observed.
+Messages read manually are skipped, and if a run fails after opening a message
+but before saving, an unread-only retry may miss it. Use `--all` to recover such
+messages. Unread status is not a durable ingestion checkpoint; future reliable
+scheduled ingestion should track collected message IDs independently in SQLite.
 
 The browser has its own 1440x1000 viewport, independent of your display. The
 collector selects each matching message and waits for the preview's record ID
@@ -87,9 +108,9 @@ one unique `*.json.enc` file per run. The separate 32-byte encryption key is
 mode `0700`. Both locations are ignored by Git. Do not lose the key, and do not
 back it up alongside ciphertext without separate protection. The exported
 `decryptRun` function supports local downstream processing without storing
-plaintext files. Nothing is stored in SQLite yet, and automatic retention is
-not implemented; remove unneeded encrypted run files according to the retention
-policy.
+plaintext files. To import results into SQLite, run the root command
+`npm run data -- import --account lkwash-parent`. The collector does not import
+automatically. Original files are retained; automatic retention is not implemented.
 
 The key is readable by your Linux account, so encryption here does not protect
 against a compromised account or theft of an unencrypted disk containing both

@@ -1,0 +1,12 @@
+{
+  "portals": {
+    "skyward": {
+      "urls": {
+        "login": "https://www.q.wa-k12.net/lkwashSTS",
+        "messages": {
+          "inbox": "https://www.q.wa-k12.net/lkwash/MessageCenter/Message/MyMessages"
+        }
+      }
+    }
+  }
+}
