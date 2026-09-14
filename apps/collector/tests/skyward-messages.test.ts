@@ -3,8 +3,11 @@ import { after, before, test } from "node:test";
 import { chromium, type Browser } from "playwright";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
-import { collectMessages, dateWindow, decryptRun, encryptRun, messageDate, parseDays, parseMessageOptions } from "../src/skyward-messages";
+import { SqliteMessageStore } from "@schoolhawk/storage/sqlite";
+import { collectMessages, collectMessagesToStore, dateWindow, decryptRun, encryptRun, messageDate, parseDays, parseMessageOptions } from "../src/skyward-messages";
 import portalConfig from "../../../config/portals.json";
 
 let browser: Browser;
@@ -59,12 +62,24 @@ test("builds ISO dates from named parts rather than locale-formatted strings", (
 });
 
 test("defaults to unread and accepts only the optional all flag", () => {
-  assert.deepEqual(parseMessageOptions(["7"]), { days: 7, includeRead: false });
-  assert.deepEqual(parseMessageOptions(["7", "--all"]), { days: 7, includeRead: true });
-  assert.deepEqual(parseMessageOptions(["--all", "7"]), { days: 7, includeRead: true });
+  assert.deepEqual(parseMessageOptions(["7"]), { days: 7, includeRead: false, accountId: undefined });
+  assert.deepEqual(parseMessageOptions(["7", "--all"]), { days: 7, includeRead: true, accountId: undefined });
+  assert.deepEqual(parseMessageOptions(["--all", "7"]), { days: 7, includeRead: true, accountId: undefined });
   for (const args of [["--all"], ["7", "--all", "--all"], ["7", "--unknown"]]) {
     assert.throws(() => parseMessageOptions(args));
   }
+});
+
+test("validates the storage account alias before session access", () => {
+  assert.deepEqual(parseMessageOptions(["7", "--account", "lkwash-parent", "--all"]), {
+    days: 7, includeRead: true, accountId: "lkwash-parent",
+  });
+  for (const args of [["7", "--account"], ["7", "--account", "parent~"],
+    ["7", "--account", "parent", "--account", "other"]]) assert.throws(() => parseMessageOptions(args), /Use --account/);
+  const result = spawnSync(process.execPath, ["--import", "tsx", path.resolve(__dirname, "../src/skyward-messages.ts"), "7"], { encoding: "utf8" });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /--account lkwash-parent/);
+  assert.match(result.stderr, /No login was attempted/);
 });
 
 function fixture(dates: string[], readIds: number[] = []) {
@@ -79,6 +94,48 @@ function fixture(dates: string[], readIds: number[] = []) {
       });
     </script>`;
 }
+
+test("writes directly to SQLite and deduplicates current messages across collection runs", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "schoolhawk-collect-store-"));
+  const store = new SqliteMessageStore(path.join(directory, "database/schoolhawk.sqlite"), randomBytes(32));
+  const page = await browser.newPage();
+  try {
+    await page.route("**/*", route => route.fulfill({ contentType: "text/html", body: fixture(["12/09/2026", "06/09/2026"]) }));
+    await page.goto(portalConfig.portals.skyward.urls.messages.inbox);
+    const first = await collectMessagesToStore(page, store, "parent", 7, now, 500, { includeRead: true });
+    const second = await collectMessagesToStore(page, store, "parent", 7, now, 500, { includeRead: true });
+    assert.equal(first.status, "complete");
+    assert.equal(second.status, "complete");
+    assert.notEqual(first.runId, second.runId);
+    assert.equal(store.listRuns("parent").length, 2);
+    assert.equal(store.listMessages("parent").length, 1);
+    assert.equal(store.listMessages("parent")[0].message.unreadBeforeOpen, false);
+    assert.equal(store.importRun("parent", second), "already-imported");
+    assert.deepEqual(store.getRun("parent", first.runId), first);
+    assert.deepEqual(store.getRun("parent", second.runId), second);
+    assert.equal(store.listMessages("other").length, 0);
+    assert.deepEqual(readdirSync(directory), ["database"]);
+    await page.unroute("**/*");
+    await page.route("**/*", route => route.fulfill({ contentType: "text/html", body: fixture(["12/09/2026"]) }));
+    await page.goto(portalConfig.portals.skyward.urls.messages.inbox);
+    const partial = await collectMessagesToStore(page, store, "parent", 7, now, 200);
+    assert.equal(partial.status, "partial");
+    assert.deepEqual(store.getRun("parent", partial.runId), partial);
+    assert.equal(store.listMessages("parent")[0].runId, second.runId);
+    await page.setContent("<h1>Loading</h1>");
+    const failed = await collectMessagesToStore(page, store, "parent", 7, now, 200);
+    assert.equal(failed.status, "failed");
+    assert.deepEqual(store.getRun("parent", failed.runId), failed);
+    assert.equal(store.listMessages("parent").length, 1);
+    await assert.rejects(() => collectMessagesToStore(page, {
+      importRun() { throw new Error("Synthetic database failure"); },
+    }, "parent", 7, now, 200), /Synthetic database failure/);
+  } finally {
+    await page.close();
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("unread mode never clicks read rows; all mode includes both statuses within the date range", async () => {
   const page = await browser.newPage();

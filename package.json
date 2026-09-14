@@ -5,6 +5,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "npm run test --workspaces --if-present",
+    "cli": "npm run cli --workspace @schoolhawk/cli --",
     "data": "npm run data --workspace @schoolhawk/cli --",
     "skyward:login": "npm run skyward:login --workspace @schoolhawk/collector",
     "skyward:messages": "npm run skyward:messages --workspace @schoolhawk/collector --"

@@ -50,18 +50,18 @@ verify your real credentials.
 ## Collect Messages for N Days
 
 ```bash
-npm run skyward:messages -- 7
+npm run skyward:messages -- 7 --account lkwash-parent
 ```
 
 By default, only messages observed as unread in the requested date window are
 opened and collected. To include read messages as well:
 
 ```bash
-npm run skyward:messages -- 7 --all
+npm run skyward:messages -- 7 --account lkwash-parent --all
 ```
 
 Both modes scan list metadata for date coverage; `--all` does not remove the
-date limit. The output summary and encrypted run include `selection` (`unread`
+date limit. The output summary and stored run include `selection` (`unread`
 or `all`). Older saved runs without this field used all-message collection.
 A complete unread-only run with zero messages means no matching unread messages
 were found, not that the inbox contains no messages.
@@ -102,21 +102,35 @@ a genuinely empty inbox, or a date range reaching beyond the oldest message,
 can be reported as incomplete. This is intentional until that UI state is
 verified. Portal layout changes may require updated selectors.
 
-Results are AES-256-GCM encrypted under repository-root `data/messages/`, with
-one unique `*.json.enc` file per run. The separate 32-byte encryption key is
-`playwright/.auth/messages.key`. Files are mode `0600`; private directories are
-mode `0700`. Both locations are ignored by Git. Do not lose the key, and do not
-back it up alongside ciphertext without separate protection. The exported
-`decryptRun` function supports local downstream processing without storing
-plaintext files. To import results into SQLite, run the root command
-`npm run data -- import --account lkwash-parent`. The collector does not import
-automatically. Original files are retained; automatic retention is not implemented.
+Results are written directly through the storage layer to repository-root
+`data/database/schoolhawk.sqlite`. Run `bash scripts/setup-database.sh` from the
+repository root before first collection. The required `--account` value is a
+stable, non-sensitive alias, not a username; keep using the same alias for the
+same portal account. Use `lkwash-parent` to match the existing imported data.
+
+The database and original 32-byte `playwright/.auth/messages.key` are checked
+before browser launch. The collector never generates or replaces a key. Message
+payloads are AES-256-GCM encrypted; query metadata remains plaintext. Files are
+mode `0600`; private directories are mode `0700`. Both locations are ignored by
+Git. Keep a separately protected recovery copy of the key.
+
+The storage layer deduplicates current messages by account and Skyward message
+ID, while preserving each run's observations as history. Complete, partial, and
+failed results returned by collection are saved transactionally before reporting
+their status. Partial/failed observations do not overwrite the complete-message
+view. Errors before inbox collection starts do not create a run. A database write
+failure exits unsuccessfully, without a fallback file; after fixing storage use
+`--all` to recover messages that may already have been marked read.
+
+No `data/messages/` folder or per-run file is created by collection anymore.
+Existing encrypted files remain untouched and can still be imported with the
+root command `npm run data -- import --account lkwash-parent`.
 
 The key is readable by your Linux account, so encryption here does not protect
 against a compromised account or theft of an unencrypted disk containing both
 key and ciphertext. Deployment still requires the planned encrypted volume.
 
-Only counts, date range, status, safe warning codes, and output path are printed.
+Only counts, date range, status, safe warning codes, run ID, and database path are printed.
 Session lifetimes are controlled by Skyward. If `INBOX_NAVIGATION` fails because
 the session expired, renew locally with `npm run skyward:login` and retry; the
 collector does not repeatedly submit credentials. An old state file without

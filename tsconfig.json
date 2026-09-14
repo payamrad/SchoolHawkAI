@@ -9,6 +9,6 @@
     "esModuleInterop": true,
     "types": ["node"]
   },
-  "include": ["apps/**/*.ts", "packages/**/*.ts"],
+  "include": ["apps/**/*.ts", "packages/**/*.ts", "scripts/**/*.ts"],
   "exclude": ["**/node_modules"]
 }

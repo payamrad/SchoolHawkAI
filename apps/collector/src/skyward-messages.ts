@@ -1,10 +1,11 @@
 import { chromium, type Page } from "playwright";
-import { randomBytes, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { lstat, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import portalConfig from "../../../config/portals.json";
 import type { MessageRun } from "@schoolhawk/core/messages";
-import { encryptRun } from "@schoolhawk/storage/encrypted-runs";
+import { SqliteMessageStore } from "@schoolhawk/storage/sqlite";
+import type { MessageStore } from "@schoolhawk/storage/messages";
 export { encryptRun, decryptRun } from "@schoolhawk/storage/encrypted-runs";
 export type { CollectedMessage, MessageRun } from "@schoolhawk/core/messages";
 
@@ -19,19 +20,30 @@ class MessageUsageError extends Error {}
 
 export function parseDays(args: string[]): number {
   if (args.length !== 1 || !/^\d+$/.test(args[0])) {
-    throw new MessageUsageError("Provide exactly one day count. From apps/collector run: npm run skyward:messages -- 7");
+    throw new MessageUsageError("Provide exactly one day count. Run: npm run skyward:messages -- 7 --account lkwash-parent");
   }
   const days = Number(args[0]);
   if (!Number.isInteger(days) || days < 1 || days > 366) {
-    throw new MessageUsageError("N must be an integer between 1 and 366. Example: npm run skyward:messages -- 7");
+    throw new MessageUsageError("N must be an integer between 1 and 366. Example: npm run skyward:messages -- 7 --account lkwash-parent");
   }
   return days;
 }
 
 export function parseMessageOptions(args: string[]) {
-  const allFlags = args.filter(arg => arg === "--all");
-  if (allFlags.length > 1) throw new MessageUsageError("Use --all at most once. Example: npm run skyward:messages -- 7 --all");
-  return { days: parseDays(args.filter(arg => arg !== "--all")), includeRead: allFlags.length === 1 };
+  const remaining = [...args];
+  const accountIndex = remaining.indexOf("--account");
+  let accountId: string | undefined;
+  if (accountIndex !== -1) {
+    accountId = remaining[accountIndex + 1];
+    if (remaining.filter(arg => arg === "--account").length !== 1 ||
+        !accountId || !/^[a-zA-Z0-9_-]{1,100}$/.test(accountId)) {
+      throw new MessageUsageError("Use --account once with an alias containing letters, digits, underscores, or hyphens. Example: --account lkwash-parent");
+    }
+    remaining.splice(accountIndex, 2);
+  }
+  const allFlags = remaining.filter(arg => arg === "--all");
+  if (allFlags.length > 1) throw new MessageUsageError("Use --all at most once. Example: npm run skyward:messages -- 7 --account lkwash-parent --all");
+  return { days: parseDays(remaining.filter(arg => arg !== "--all")), includeRead: allFlags.length === 1, accountId };
 }
 
 export function dateWindow(days: number, now = new Date()): MessageRun["window"] {
@@ -153,14 +165,18 @@ async function checkPrivate(filePath: string, directory = false) {
       (directory ? !info.isDirectory() : !info.isFile())) throw new Error("Unsafe permissions or ownership.");
 }
 
-async function writePrivate(filePath: string, data: string | Buffer) {
-  const file = await open(filePath, "wx", 0o600);
-  try { await file.writeFile(data); } finally { await file.close(); }
+export async function collectMessagesToStore(page: Page, store: Pick<MessageStore, "importRun">, accountId: string,
+  days: number, now = new Date(), timeout = 15_000, options: { includeRead?: boolean } = {}): Promise<MessageRun> {
+  const result = await collectMessages(page, days, now, timeout, options);
+  runStage = "DATABASE_WRITE";
+  store.importRun(accountId, result);
+  return result;
 }
 
 async function main() {
   process.umask(0o077);
-  const { days, includeRead } = parseMessageOptions(process.argv.slice(2));
+  const { days, includeRead, accountId } = parseMessageOptions(process.argv.slice(2));
+  if (!accountId) throw new MessageUsageError("Provide the same account alias used for stored data. Example: npm run skyward:messages -- 7 --account lkwash-parent");
   runStage = "DATE_WINDOW";
   dateWindow(days);
   runStage = "PRIVATE_SESSION_FILE";
@@ -173,40 +189,39 @@ async function main() {
   if (entry.origin !== new URL(INBOX).origin ||
     !(entry.pathname === "/lkwash" || entry.pathname.startsWith("/lkwash/")) ||
     entry.username || entry.password) throw new Error("Invalid saved application entry.");
-  runStage = "ENCRYPTED_OUTPUT_STORAGE";
+  runStage = "DATABASE_OPEN";
   const dataDirectory = path.join(ROOT, "data");
   await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
   await checkPrivate(dataDirectory, true);
-  const outputDirectory = path.join(dataDirectory, "messages");
-  await mkdir(outputDirectory, { recursive: true, mode: 0o700 });
-  await checkPrivate(outputDirectory, true);
+  const databasePath = path.join(dataDirectory, "database/schoolhawk.sqlite");
+  runStage = "PRIVATE_DATABASE_KEY";
   const keyPath = path.join(AUTH, "messages.key");
-  try { await writePrivate(keyPath, randomBytes(32)); } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-  }
   await checkPrivate(keyPath);
   const key = await readFile(keyPath);
-  if (key.length !== 32) throw new Error("Invalid encryption key.");
-  runStage = "BROWSER_LAUNCH";
-  const browser = await chromium.launch({ headless: true, chromiumSandbox: true });
   try {
-    runStage = "SESSION_RESUME";
-    const context = await browser.newContext({ storageState: { cookies, origins },
-      viewport: { width: 1440, height: 1000 }, timezoneId: ZONE, acceptDownloads: false });
-    const page = await context.newPage();
-    page.setDefaultTimeout(30_000);
-    await page.goto(entry.href, { waitUntil: "domcontentloaded" });
-    runStage = "INBOX_NAVIGATION";
-    await page.getByRole("link", { name: /my messages/i }).first().click();
-    const result = await collectMessages(page, days, new Date(), 15_000, { includeRead });
-    runStage = "ENCRYPTED_RESULT_WRITE";
-    const output = path.join(outputDirectory, `${result.runId}.json.enc`);
-    await writePrivate(output, JSON.stringify(encryptRun(result, key)));
-    console.log(JSON.stringify({ status: result.status, selection: result.selection, window: result.window,
-      messages: result.messages.length, scanned: result.scannedCount,
-      warning: result.warning, output: path.relative(ROOT, output) }, null, 2));
-    if (result.status !== "complete") process.exitCode = 1;
-  } finally { await browser.close(); }
+    if (key.length !== 32) throw new Error("Invalid encryption key.");
+    runStage = "DATABASE_OPEN";
+    const store = new SqliteMessageStore(databasePath, key);
+    try {
+      runStage = "BROWSER_LAUNCH";
+      const browser = await chromium.launch({ headless: true, chromiumSandbox: true });
+      try {
+        runStage = "SESSION_RESUME";
+        const context = await browser.newContext({ storageState: { cookies, origins },
+          viewport: { width: 1440, height: 1000 }, timezoneId: ZONE, acceptDownloads: false });
+        const page = await context.newPage();
+        page.setDefaultTimeout(30_000);
+        await page.goto(entry.href, { waitUntil: "domcontentloaded" });
+        runStage = "INBOX_NAVIGATION";
+        await page.getByRole("link", { name: /my messages/i }).first().click();
+        const result = await collectMessagesToStore(page, store, accountId, days, new Date(), 15_000, { includeRead });
+        console.log(JSON.stringify({ status: result.status, selection: result.selection, window: result.window,
+          messages: result.messages.length, scanned: result.scannedCount, runId: result.runId,
+          warning: result.warning, database: path.relative(ROOT, databasePath) }, null, 2));
+        if (result.status !== "complete") process.exitCode = 1;
+      } finally { await browser.close(); }
+    } finally { store.close(); }
+  } finally { key.fill(0); }
 }
 
 if (require.main === module) {
@@ -218,6 +233,11 @@ if (require.main === module) {
     }
     if (runStage === "DATE_WINDOW" || runStage === "CONFIGURATION") {
       console.error(`MESSAGES: Failed at ${runStage} before session access (Node ${process.version}). Check the system clock and Node timezone support. No login was attempted.`);
+      process.exitCode = 1;
+      return;
+    }
+    if (["PRIVATE_DATABASE_KEY", "DATABASE_OPEN", "DATABASE_WRITE"].includes(runStage)) {
+      console.error(`MESSAGES: Failed at ${runStage}. Check database permissions, disk space, and the original messages.key. For a new installation run bash scripts/setup-database.sh; never replace a lost key. If messages were opened, retry with --all after fixing storage. No private error details printed.`);
       process.exitCode = 1;
       return;
     }
