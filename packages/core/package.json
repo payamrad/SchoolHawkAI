@@ -2,6 +2,6 @@
   "name": "@schoolhawk/core",
   "version": "0.0.0",
   "private": true,
-  "exports": { "./messages": "./schemas/messages.ts" },
+  "exports": { "./messages": "./schemas/messages.ts", "./assignments": "./schemas/assignments.ts", "./grades": "./schemas/grades.ts", "./assignment-correlation": "./assignment-correlation.ts", "./canvas-assignments": "./schemas/canvas-assignments.ts" },
   "dependencies": { "zod": "^4.6.5" }
 }

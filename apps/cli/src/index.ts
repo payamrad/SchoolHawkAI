@@ -1,15 +1,17 @@
-import { readFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import type { MessageStore } from "@schoolhawk/storage/messages";
-import { checkPrivatePath } from "@schoolhawk/storage/private-files";
-import { SqliteMessageStore } from "@schoolhawk/storage/sqlite";
+import { withWorkspaceStore } from "@schoolhawk/storage/canvas-sqlite";
+import { CanvasMappingError } from "@schoolhawk/storage/canvas-assignments";
+import { CanvasCliUsageError, runCanvasCli } from "./canvas";
 
 const HELP = `SchoolHawkAI
 
 Usage: npm run cli -- Truncate --LoginNotification --account <alias> [--dry-run | --yes]
   npm run cli -- Messages --account <alias> -- <N>
+  npm run cli -- Assignments --account <skyward-alias> [--student <id>] [--limit N --offset N]
+  npm run cli -- Canvas --help
 
 Messages prints up to N stored messages as JSON, newest sent date first (N: 1-1000).
 Uses the latest complete observation per message ID. Output includes decrypted
@@ -108,6 +110,8 @@ export async function Truncate(store: Pick<MessageStore, "truncateMessages">, op
 
 export async function runCli(args: string[], root = path.resolve(__dirname, "../../..")): Promise<void> {
   process.umask(0o077);
+  if (args[0] === "Canvas") return runCanvasCli(args.slice(1), root);
+  if (args[0] === "Assignments") return runCanvasCli(args[1] === "--help" ? ["--help"] : ["enriched", ...args.slice(1)], root);
   const command = parseCliArgs(args);
   if (command.command === "help") {
     console.log(HELP);
@@ -116,17 +120,7 @@ export async function runCli(args: string[], root = path.resolve(__dirname, "../
   if (command.command === "Truncate" && !command.options.dryRun && !command.options.yes && !process.stdin.isTTY) {
     throw new CliUsageError("Deletion needs an interactive terminal. Use --dry-run to preview or --yes to explicitly authorize deletion.");
   }
-  const auth = path.join(root, "playwright/.auth");
-  const keyPath = path.join(auth, "messages.key");
-  const data = path.join(root, "data");
-  const databasePath = path.join(data, "database/schoolhawk.sqlite");
-  for (const directory of [auth, data, path.dirname(databasePath)]) checkPrivatePath(directory, true);
-  checkPrivatePath(keyPath);
-  checkPrivatePath(databasePath);
-  const key = readFileSync(keyPath);
-  try {
-    const store = new SqliteMessageStore(databasePath, key);
-    try {
+  await withWorkspaceStore(root, async store => {
       if (command.command === "Messages") {
         Messages(store, command.options);
         return;
@@ -136,14 +130,25 @@ export async function runCli(args: string[], root = path.resolve(__dirname, "../
         try { return (await terminal.question("Type DELETE to confirm: ")).trim() === "DELETE"; }
         finally { terminal.close(); }
       });
-    } finally { store.close(); }
-  } finally { key.fill(0); }
+  });
+}
+
+export function cliFailureMessage(error: unknown, args: string[]): string {
+  if (error instanceof CanvasMappingError) {
+    const guidance = error.code === "NO_COURSE_MAPPINGS"
+      ? "Review the stored student/course pairs with Canvas scopes, then confirm each intended pair with Canvas map. This setup is needed once; no assignment links or match statuses were changed."
+      : "List the saved mappings with Canvas mappings and select an ID for the same --account, or omit --mapping to use all confirmed mappings. No assignment links or match statuses were changed.";
+    return `CANVAS: ${error.code}. ${error.message}\n${guidance}\nHelp (works from the root or collector folder): npm run canvas:match -- --help`;
+  }
+  if (error instanceof CliUsageError || error instanceof CanvasCliUsageError) return error.message;
+  const rollback = args[0] === "Truncate" ? " Any failed deletion transaction was rolled back." : "";
+  return `CLI command failed. Check the existing database, original key, private permissions, and disk availability.${rollback} Private error details withheld.`;
 }
 
 if (require.main === module) {
-  runCli(process.argv.slice(2)).catch((error: unknown) => {
-    console.error(error instanceof CliUsageError ? error.message :
-      "CLI command failed. Check the existing database, original key, private permissions, and disk availability. Any failed deletion transaction was rolled back. Private error details withheld.");
+  const args = process.argv.slice(2);
+  runCli(args).catch((error: unknown) => {
+    console.error(cliFailureMessage(error, args));
     process.exitCode = 1;
   });
 }

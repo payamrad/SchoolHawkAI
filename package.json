@@ -8,6 +8,11 @@
     "cli": "npm run cli --workspace @schoolhawk/cli --",
     "data": "npm run data --workspace @schoolhawk/cli --",
     "skyward:login": "npm run skyward:login --workspace @schoolhawk/collector",
+    "canvas:login": "npm run canvas:login --workspace @schoolhawk/collector",
+    "canvas:assignments": "npm run canvas:assignments --workspace @schoolhawk/collector --",
+    "canvas:match": "npm run canvas:match --workspace @schoolhawk/collector --",
+    "skyward:assignments": "npm run skyward:assignments --workspace @schoolhawk/collector --",
+    "skyward:grades": "npm run skyward:grades --workspace @schoolhawk/collector --",
     "skyward:messages": "npm run skyward:messages --workspace @schoolhawk/collector --"
   },
   "devDependencies": {

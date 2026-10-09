@@ -4,6 +4,10 @@
   "private": true,
   "exports": {
     "./messages": "./messages.ts",
+    "./assignments": "./assignments.ts",
+    "./grades": "./grades.ts",
+    "./canvas-assignments": "./canvas-assignments.ts",
+    "./canvas-sqlite": "./sqlite-canvas-store.ts",
     "./sqlite": "./sqlite-message-store.ts",
     "./encrypted-runs": "./encrypted-runs.ts",
     "./private-files": "./private-files.ts"

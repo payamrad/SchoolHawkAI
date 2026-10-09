@@ -3,6 +3,11 @@
   "private": true,
   "scripts": {
     "skyward:login": "tsx src/skyward-login.ts",
+    "canvas:login": "tsx src/canvas-login.ts",
+    "canvas:assignments": "tsx src/canvas-assignments.ts",
+    "canvas:match": "npm run cli --workspace @schoolhawk/cli -- Canvas match",
+    "skyward:assignments": "tsx src/skyward-assignments.ts",
+    "skyward:grades": "tsx src/skyward-grades.ts",
     "skyward:messages": "tsx src/skyward-messages.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts"
@@ -10,9 +15,13 @@
   "dependencies": {
     "@schoolhawk/core": "0.0.0",
     "@schoolhawk/storage": "0.0.0",
+    "html-to-text": "^10.0.1",
+    "http-link-header": "^1.1.4",
     "playwright": "^1.63.0"
   },
   "devDependencies": {
+    "@types/html-to-text": "^9.0.4",
+    "@types/http-link-header": "^1.0.7",
     "@types/node": "^20.19.43",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2"
