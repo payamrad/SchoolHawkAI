@@ -5,6 +5,9 @@ import type { MessageStore } from "@schoolhawk/storage/messages";
 import { withWorkspaceStore } from "@schoolhawk/storage/canvas-sqlite";
 import { CanvasMappingError } from "@schoolhawk/storage/canvas-assignments";
 import { CanvasCliUsageError, runCanvasCli } from "./canvas";
+import { DiagnosticLogError, reportDiagnostic, withLocalDiagnostics } from "@schoolhawk/storage/diagnostics";
+import { ReviewError } from "@schoolhawk/core/review";
+import { ReviewUsageError, runReviewCli } from "./review";
 
 const HELP = `SchoolHawkAI
 
@@ -12,6 +15,7 @@ Usage: npm run cli -- Truncate --LoginNotification --account <alias> [--dry-run 
   npm run cli -- Messages --account <alias> -- <N>
   npm run cli -- Assignments --account <skyward-alias> [--student <id>] [--limit N --offset N]
   npm run cli -- Canvas --help
+  npm run cli -- Review --help
 
 Messages prints up to N stored messages as JSON, newest sent date first (N: 1-1000).
 Uses the latest complete observation per message ID. Output includes decrypted
@@ -109,7 +113,17 @@ export async function Truncate(store: Pick<MessageStore, "truncateMessages">, op
 }
 
 export async function runCli(args: string[], root = path.resolve(__dirname, "../../..")): Promise<void> {
+  const help = (args.length === 1 && args[0] === "--help") ||
+    (args.length === 2 && ["Truncate", "Messages", "Assignments", "Canvas", "Review"].includes(args[0]) && args[1] === "--help") ||
+    (args.length === 3 && args[0] === "Canvas" && args[1] === "match" && args[2] === "--help");
+  if (help) return executeCli(args, root);
+  return withLocalDiagnostics(root, "cli", () => executeCli(args, root));
+}
+
+async function executeCli(args: string[], root: string): Promise<void> {
   process.umask(0o077);
+  reportDiagnostic({ level: "info", code: "STAGE_STARTED", stage: "CLI_COMMAND" });
+  if (args[0] === "Review") return runReviewCli(args.slice(1), root);
   if (args[0] === "Canvas") return runCanvasCli(args.slice(1), root);
   if (args[0] === "Assignments") return runCanvasCli(args[1] === "--help" ? ["--help"] : ["enriched", ...args.slice(1)], root);
   const command = parseCliArgs(args);
@@ -121,6 +135,7 @@ export async function runCli(args: string[], root = path.resolve(__dirname, "../
     throw new CliUsageError("Deletion needs an interactive terminal. Use --dry-run to preview or --yes to explicitly authorize deletion.");
   }
   await withWorkspaceStore(root, async store => {
+      reportDiagnostic({ level: "info", code: "STAGE_STARTED", stage: "CLI_COMMAND" });
       if (command.command === "Messages") {
         Messages(store, command.options);
         return;
@@ -134,6 +149,8 @@ export async function runCli(args: string[], root = path.resolve(__dirname, "../
 }
 
 export function cliFailureMessage(error: unknown, args: string[]): string {
+  if (error instanceof DiagnosticLogError) return `LOCAL_LOG: ${error.message}`;
+  if (error instanceof ReviewUsageError || error instanceof ReviewError) return `REVIEW: ${error.message}`;
   if (error instanceof CanvasMappingError) {
     const guidance = error.code === "NO_COURSE_MAPPINGS"
       ? "Review the stored student/course pairs with Canvas scopes, then confirm each intended pair with Canvas map. This setup is needed once; no assignment links or match statuses were changed."

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
-import { chromium, type Browser } from "playwright";
-import { randomBytes } from "node:crypto";
+import { chromium, type Browser, type Page } from "playwright";
+import { randomBytes, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { SqliteMessageStore } from "@schoolhawk/storage/sqlite";
+import { DiagnosticLogError, withDiagnosticSink, type DiagnosticEvent } from "@schoolhawk/core/diagnostics";
 import { collectMessages, collectMessagesToStore, dateWindow, decryptRun, encryptRun, messageDate, parseDays, parseMessageOptions } from "../src/skyward-messages";
 import portalConfig from "../../../config/portals.json";
 
@@ -42,6 +42,9 @@ test("uses inclusive Pacific calendar days including across DST and UTC midnight
   assert.equal(messageDate("Yesterday", "2026-09-13"), "2026-09-12");
   assert.throws(() => messageDate("31/02/2026", "2026-09-13"));
   assert.throws(() => messageDate("unknown", "2026-09-13"));
+  assert.throws(() => messageDate("23:10 PM", "2026-09-13"));
+  assert.throws(() => messageDate("00:10 AM", "2026-09-13"));
+  assert.equal(messageDate("12:10 PM", "2026-09-13"), "2026-09-13");
 });
 
 test("builds ISO dates from named parts rather than locale-formatted strings", () => {
@@ -84,19 +87,23 @@ test("validates the storage account alias before session access", () => {
 
 function fixture(dates: string[], readIds: number[] = []) {
   return `<div class="myMessagesVueBrowse"><div class="vueBrowse__unlockedBody">${dates.map((date, index) =>
-    `<div class="messageCell ${readIds.includes(index) ? "" : "messageCell--state-unread"}" data-messageid="${index}"><span class="messageCell__from">Synthetic sender</span><div class="messageCell__subject">Message ${index}</div><div class="messageCell__date">${date}</div></div>`).join("")}</div></div>
+    `<div class="messageCell ${readIds.includes(index) ? "messageCell--state-read" : "messageCell--state-unread"}" data-messageid="${index}"><span class="messageCell__from">Synthetic sender</span><div class="messageCell__subject">Message ${index}</div><div class="messageCell__date">${date}</div></div>`).join("")}</div></div>
     <div class="detailsPanel__myMessages"></div><script>
-      document.querySelectorAll('.messageCell__subject').forEach(subject => subject.onclick = () => {
+      document.querySelector('.myMessagesVueBrowse').addEventListener('click', event => {
+        const subject = event.target.closest('.messageCell__subject');
+        if (!subject) return;
         const id = subject.parentElement.dataset.messageid;
         subject.parentElement.dataset.opened = 'yes';
         subject.parentElement.classList.remove('messageCell--state-unread');
+        subject.parentElement.classList.add('messageCell--state-read');
         document.querySelector('.detailsPanel__myMessages').innerHTML = '<div class="currentRecordContent" data-primaryid="' + id + '"><div class="myMessageContent">Synthetic body ' + id + '</div></div>';
       });
     </script>`;
 }
 
 test("writes directly to SQLite and deduplicates current messages across collection runs", async () => {
-  const directory = mkdtempSync(path.join(tmpdir(), "schoolhawk-collect-store-"));
+  const directory = `.collector-message-store-${randomUUID()}`;
+  mkdirSync(directory);
   const store = new SqliteMessageStore(path.join(directory, "database/schoolhawk.sqlite"), randomBytes(32));
   const page = await browser.newPage();
   try {
@@ -122,6 +129,16 @@ test("writes directly to SQLite and deduplicates current messages across collect
     assert.equal(partial.status, "partial");
     assert.deepEqual(store.getRun("parent", partial.runId), partial);
     assert.equal(store.listMessages("parent")[0].runId, second.runId);
+    await page.unroute("**/*");
+    await page.route("**/*", route => route.fulfill({ contentType: "text/html",
+      body: fixture(["12/09/2026", "11/09/2026", "10/09/2026", "06/09/2026"]) }));
+    await page.goto(portalConfig.portals.skyward.urls.messages.inbox);
+    await page.locator('[data-messageid="1"]').evaluate(element => { element.setAttribute("class", "messageCell"); });
+    const invalid = await collectMessagesToStore(page, store, "parent", 7, now, 200);
+    assert.equal(invalid.status, "partial");
+    assert.deepEqual(invalid.messages.map(message => message.id), ["0", "2"]);
+    assert.deepEqual(store.getRun("parent", invalid.runId), invalid);
+    assert.equal(store.listMessages("parent").find(record => record.message.id === "0")?.runId, second.runId);
     await page.setContent("<h1>Loading</h1>");
     const failed = await collectMessagesToStore(page, store, "parent", 7, now, 200);
     assert.equal(failed.status, "failed");
@@ -245,16 +262,216 @@ test("rejects stale previews belonging to another message", async () => {
   } finally { await page.close(); }
 });
 
-test("rejects unknown dates and does not stop early on an out-of-order list", async () => {
+test("unknown dates remain failed when no messages can be safely collected", async () => {
   const page = await browser.newPage();
   try {
-    for (const dates of [["unknown"], ["06/09/2026", "12/09/2026"]]) {
-      await page.route("**/*", route => route.fulfill({ contentType: "text/html", body: fixture(dates) }));
+    await page.route("**/*", route => route.fulfill({ contentType: "text/html", body: fixture(["PRIVATE_INVALID_DATE"]) }));
+    await page.goto(portalConfig.portals.skyward.urls.messages.inbox);
+    const result = await collectMessages(page, 7, now, 200);
+    assert.equal(result.status, "failed");
+    assert.equal(result.warning, "DATE_OR_ORDER_UNVERIFIED");
+    assert.equal(result.scannedCount, 1);
+    assert.equal(await page.locator("[data-opened]").count(), 0);
+  } finally { await page.close(); }
+});
+
+test("row, unread-state and body errors skip only the affected message", async () => {
+  const page = await browser.newPage();
+  try {
+    for (const issue of ["missing-id", "missing-subject", "unknown-state", "ambiguous-state", "absent-state",
+      "stale-body", "empty-body", "oversized-body"]) {
+      const html = fixture(["12/09/2026", "11/09/2026", "10/09/2026", "06/09/2026"]) + `<script>
+        document.querySelector('.myMessagesVueBrowse').addEventListener('click', event => {
+          const row = event.target.closest('.messageCell');
+          if (row?.dataset.messageid !== '1') return;
+          const issue = ${JSON.stringify(issue)};
+          const record = document.querySelector('.currentRecordContent');
+          if (issue === 'stale-body') record.dataset.primaryid = 'PRIVATE_WRONG_RECORD';
+          if (issue === 'empty-body') record.querySelector('.myMessageContent').textContent = ' ';
+          if (issue === 'oversized-body') record.querySelector('.myMessageContent').textContent = 'x'.repeat(1000001);
+        });
+      </script>`;
+      await page.route("**/*", route => route.fulfill({ contentType: "text/html", body: html }));
       await page.goto(portalConfig.portals.skyward.urls.messages.inbox);
-      const result = await collectMessages(page, 7, now, 200);
-      assert.equal(result.status, "failed");
-      assert.equal(result.warning, "DATE_OR_ORDER_UNVERIFIED");
+      await page.locator('[data-messageid="1"]').evaluate((element, issue) => {
+        if (issue === "missing-id") element.removeAttribute("data-messageid");
+        if (issue === "missing-subject") element.querySelector(".messageCell__subject")!.textContent = "";
+        if (issue === "unknown-state") element.setAttribute("class", "messageCell messageCell--state-PRIVATE_UNKNOWN");
+        if (issue === "ambiguous-state") element.classList.add("messageCell--state-read");
+        if (issue === "absent-state") element.setAttribute("class", "messageCell");
+      }, issue);
+      const events: DiagnosticEvent[] = [];
+      // The million-character preview needs layout time before the next safe click on the Pi.
+      const timeout = issue === "oversized-body" ? 1500 : 200;
+      const result = await withDiagnosticSink(event => events.push(event), () => collectMessages(page, 7, now, timeout, { includeRead: true }));
+      assert.equal(result.status, "partial", issue);
+      assert.deepEqual(result.messages.map(message => message.id), ["0", "2"], `${issue}: ${JSON.stringify(events)}`);
+      assert.equal(result.messages[1].bodyText, "Synthetic body 2");
+      assert.equal(result.scannedCount, 4);
+      assert.equal(await page.locator(".messageCell").nth(1).getAttribute("data-opened"), issue.endsWith("-body") ? "yes" : null);
+      assert.equal(await page.locator('[data-messageid="3"]').getAttribute("data-opened"), null);
+      assert(events.some(event => event.record === 2 && event.page === 1 &&
+        event.code === (issue.endsWith("-body") ? "MESSAGE_BODY_UNVERIFIED" : issue.endsWith("-state") ? "STATE_UNKNOWN" : "RECORD_INVALID")));
+      assert.equal(events[0].code, "RUN_STARTED");
+      assert.equal(events.at(-1)?.code, "RUN_SUMMARY");
+      assert.equal(events.at(-1)?.status, "partial");
+      assert(events.every(event => event.runId === result.runId));
+      assert.doesNotMatch(JSON.stringify(events), /PRIVATE_|Synthetic|Message \d|https?:|body 2/);
       await page.unroute("**/*");
     }
+  } finally { await page.close(); }
+});
+
+test("bad or out-of-order dates disable early boundary completion while later scoped messages are retained", async () => {
+  const page = await browser.newPage();
+  try {
+    for (const dates of [["12/09/2026", "PRIVATE_INVALID_DATE", "06/09/2026"],
+      ["06/09/2026", "12/09/2026"], ["12/09/2026", "14/09/2026", "06/09/2026"]]) {
+      const html = fixture(dates) + `<script>
+        document.querySelector('.vueBrowse__unlockedBody').addEventListener('scroll', () => {
+          const container = document.querySelector('.vueBrowse__unlockedBody');
+          if (container.dataset.loaded) return;
+          container.dataset.loaded = 'yes';
+          for (const [id, date] of [['PRIVATE_LATER_ID', '11/09/2026'], ['PRIVATE_OLD_ID', '05/09/2026']]) {
+            const row = container.firstElementChild.cloneNode(true);
+            row.dataset.messageid = id;
+            delete row.dataset.opened;
+            row.className = 'messageCell messageCell--state-unread';
+            row.querySelector('.messageCell__date').textContent = date;
+            container.appendChild(row);
+          }
+        });
+      </script>`;
+      await page.route("**/*", route => route.fulfill({ contentType: "text/html", body: html }));
+      await page.goto(portalConfig.portals.skyward.urls.messages.inbox);
+      const events: DiagnosticEvent[] = [];
+      const result = await withDiagnosticSink(event => events.push(event), () => collectMessages(page, 7, now, 200));
+      assert.equal(result.status, "partial");
+      assert.equal(result.warning, "DATE_OR_ORDER_UNVERIFIED");
+      assert.equal(result.scannedCount, dates.length + 2);
+      assert.deepEqual(result.messages.map(message => message.id), [dates.length === 2 ? "1" : "0", "PRIVATE_LATER_ID"]);
+      assert(result.messages.every(message => message.sentDate >= result.window.startDate && message.sentDate <= result.window.endDate));
+      assert.equal(await page.locator('[data-messageid="PRIVATE_OLD_ID"]').getAttribute("data-opened"), null);
+      if (dates.length === 3) assert.equal(await page.locator('[data-messageid="1"]').getAttribute("data-opened"), null);
+      assert(events.some(event => event.code === "SCROLL_COMPLETENESS_UNVERIFIED" && event.page === 2));
+      assert.doesNotMatch(JSON.stringify(events), /PRIVATE_|Synthetic|https?:|14\/09/);
+      await page.unroute("**/*");
+    }
+  } finally { await page.close(); }
+});
+
+test("ambiguous message identities are not opened while later independent rows still collect", async () => {
+  const page = await browser.newPage();
+  const events: DiagnosticEvent[] = [];
+  try {
+    await page.route("**/*", route => route.fulfill({ contentType: "text/html", body: fixture(["12/09/2026", "11/09/2026", "10/09/2026", "06/09/2026"]) }));
+    await page.goto(portalConfig.portals.skyward.urls.messages.inbox);
+    await page.locator('[data-messageid="1"]').evaluate(element => { element.setAttribute("data-messageid", "0"); });
+    const result = await withDiagnosticSink(event => events.push(event), () => collectMessages(page, 7, now, 200));
+    assert.equal(result.status, "partial");
+    assert.deepEqual(result.messages.map(message => message.id), ["2"]);
+    assert.equal(result.scannedCount, 4);
+    assert.equal(await page.locator('[data-messageid="0"][data-opened]').count(), 0);
+    assert.equal(events.filter(event => event.code === "DUPLICATE_RECORD").length, 2);
+  } finally { await page.close(); }
+});
+
+test("authentication and source-scope failures stop collection without login or navigation retries", async () => {
+  const page = await browser.newPage();
+  const events: DiagnosticEvent[] = [];
+  let navigations = 0;
+  try {
+    await page.route("**/*", route => {
+      if (route.request().isNavigationRequest()) navigations++;
+      return route.fulfill({ contentType: "text/html", body: fixture(["12/09/2026", "06/09/2026"]) });
+    });
+    await page.goto(portalConfig.portals.skyward.urls.messages.inbox);
+    await page.setContent('<input type="password">');
+    const expired = await withDiagnosticSink(event => events.push(event), () => collectMessages(page, 7, now, 200));
+    assert.equal(expired.status, "failed");
+    assert.equal(expired.warning, "AUTH_REQUIRED");
+    assert.equal(navigations, 1);
+    await page.goto("https://unapproved.example/PRIVATE_SOURCE");
+    const wrongScope = await withDiagnosticSink(event => events.push(event), () => collectMessages(page, 7, now, 200));
+    assert.equal(wrongScope.status, "failed");
+    assert.equal(navigations, 2);
+    assert.equal(await page.locator("[data-opened]").count(), 0);
+    assert(events.some(event => event.code === "AUTH_REQUIRED"));
+    assert(events.some(event => event.code === "SCOPE_MISSING" && event.field === "source"));
+    assert.doesNotMatch(JSON.stringify(events), /PRIVATE_|unapproved|https?:/);
+
+    await page.unroute("**/*");
+    const html = fixture(["12/09/2026", "11/09/2026", "10/09/2026", "06/09/2026"]) + `<script>
+      document.querySelector('.myMessagesVueBrowse').addEventListener('click', event => {
+        if (event.target.closest('.messageCell')?.dataset.messageid === '1') {
+          document.body.insertAdjacentHTML('beforeend', '<input type="password">');
+        }
+      });
+    </script>`;
+    await page.route("**/*", route => route.fulfill({ contentType: "text/html", body: html }));
+    await page.goto(portalConfig.portals.skyward.urls.messages.inbox);
+    const interrupted = await withDiagnosticSink(() => {}, () => collectMessages(page, 7, now, 200));
+    assert.equal(interrupted.status, "partial");
+    assert.equal(interrupted.warning, "AUTH_REQUIRED");
+    assert.deepEqual(interrupted.messages.map(message => message.id), ["0"]);
+    assert.equal(await page.locator('[data-messageid="2"]').getAttribute("data-opened"), null);
+  } finally { await page.close(); }
+});
+
+test("message collection preserves batch and record caps without claiming empty success", async () => {
+  await withDiagnosticSink(() => {}, async () => {
+    for (const manyRows of [false, true]) {
+      let batches = 0;
+      let scrolls = 0;
+      const page = {
+        url: () => portalConfig.portals.skyward.urls.messages.inbox,
+        locator: () => ({
+          count: async () => 0,
+          first: () => ({ waitFor: async () => {} }),
+          evaluate: async () => { scrolls++; },
+          evaluateAll: async () => {
+            batches++;
+            return Array.from({ length: manyRows ? 100_001 : 1 }, (_, index) => ({
+              key: `${batches}-${index}`, id: `${batches}-${index}`, sender: "Synthetic sender", subject: "Synthetic subject",
+              date: "12/09/2026", unread: false,
+            }));
+          },
+        }),
+        waitForFunction: async () => {},
+      } as unknown as Page;
+      const result = await collectMessages(page, 7, now, 100);
+      assert.equal(result.status, "failed");
+      assert.equal(result.warning, "COLLECTION_LIMIT_REACHED");
+      assert.equal(result.messages.length, 0);
+      assert.equal(result.scannedCount, manyRows ? 100_000 : 50);
+      assert.equal(batches, manyRows ? 1 : 50);
+      assert.equal(scrolls, manyRows ? 0 : 49);
+    }
+  });
+});
+
+test("message diagnostics omit raw exceptions and DiagnosticLogError is never swallowed", async () => {
+  const events: DiagnosticEvent[] = [];
+  const brokenPage = {
+    url: () => portalConfig.portals.skyward.urls.messages.inbox,
+    locator: () => ({
+      count: async () => 0,
+      first: () => ({ waitFor: async () => { throw new Error("PRIVATE_EXTRACT_EXCEPTION https://private.example/secret"); } }),
+    }),
+  } as unknown as Page;
+  const failed = await withDiagnosticSink(event => events.push(event), () => collectMessages(brokenPage, 7, now, 100));
+  assert.equal(failed.status, "failed");
+  assert(events.some(event => event.code === "LIST_LAYOUT_UNVERIFIED" && event.errorType === "other"));
+  assert.doesNotMatch(JSON.stringify(events), /PRIVATE_|https?:|secret/);
+
+  const page = await browser.newPage();
+  const error = new DiagnosticLogError("PRIVATE_LOG_FAILURE");
+  try {
+    await page.route("**/*", route => route.fulfill({ contentType: "text/html", body: fixture(["12/09/2026", "06/09/2026"]) }));
+    await page.goto(portalConfig.portals.skyward.urls.messages.inbox);
+    await page.locator('[data-messageid="0"]').evaluate(element => { element.setAttribute("class", "messageCell"); });
+    await assert.rejects(() => withDiagnosticSink(event => {
+      if (event.code === "STATE_UNKNOWN") throw error;
+    }, () => collectMessages(page, 7, now, 200)), failure => failure === error);
   } finally { await page.close(); }
 });

@@ -2,6 +2,8 @@ import { chromium, type Browser, type BrowserContext, type Page } from "playwrig
 import { chmod, lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { DiagnosticLogError, diagnosticErrorType, reportDiagnostic, type DiagnosticEvent } from "@schoolhawk/core/diagnostics";
+import { withLocalDiagnostics } from "@schoolhawk/storage/diagnostics";
 
 export const AUTH_DIRECTORY = path.resolve(__dirname, "../../../playwright/.auth");
 export type PortalId = "skyward" | "canvas";
@@ -12,6 +14,8 @@ export async function loginStep<Result>(diagnostic: string, operation: () => Pro
   try {
     return await operation();
   } catch (error) {
+    if (error instanceof DiagnosticLogError) throw error;
+    reportDiagnostic({ level: "error", code: "SCOPE_FAILED", section: "session", errorType: diagnosticErrorType(error) });
     if (error instanceof LoginDiagnostic) throw error;
     throw new LoginDiagnostic(diagnostic);
   }
@@ -70,6 +74,7 @@ export async function prepareAuthDirectory(directory = AUTH_DIRECTORY): Promise<
 export async function saveVerifiedSession(browser: Pick<Browser, "newContext">, context: BrowserContext, page: Page, portal: LoginPortal,
   options: { directory?: string; successSelector?: string; timeout?: number } = {}): Promise<void> {
   const directory = options.directory ?? AUTH_DIRECTORY;
+  reportDiagnostic({ level: "info", code: "STAGE_STARTED", portal: portal.id, stage: "LOGIN_VERIFY" });
   await portal.confirm(page, options.successSelector, options.timeout);
   const entryUrl = page.url();
   const entry = new URL(entryUrl);
@@ -84,9 +89,15 @@ export async function saveVerifiedSession(browser: Pick<Browser, "newContext">, 
     await loginStep("SESSION_REUSE: Initial login was verified, but a fresh browser context could not verify the saved session.", async () => {
       await verificationPage.goto(entryUrl, { waitUntil: "domcontentloaded" });
       try { await portal.confirm(verificationPage, options.successSelector, options.timeout); }
-      catch { throw new Error(); }
+      catch (error) {
+        if (error instanceof DiagnosticLogError) throw error;
+        reportDiagnostic({ level: "error", code: "AUTH_REQUIRED", portal: portal.id, stage: "LOGIN_VERIFY",
+          errorType: diagnosticErrorType(error) });
+        throw new Error("Saved session verification failed.");
+      }
     });
   } finally { await verificationContext.close(); }
+  reportDiagnostic({ level: "info", code: "STAGE_STARTED", portal: portal.id, stage: "SESSION_SAVE" });
   await prepareAuthDirectory(directory);
   const temporaryPath = path.join(directory, `.${portal.id}-${randomUUID()}.tmp`);
   try {
@@ -101,8 +112,18 @@ export async function saveVerifiedSession(browser: Pick<Browser, "newContext">, 
 
 export async function runPortalLogin(portal: LoginPortal): Promise<void> {
   process.umask(0o077);
+  await withLocalDiagnostics(path.resolve(__dirname, "../../.."), `${portal.id}:login`, () => performPortalLogin(portal));
+}
+
+async function performPortalLogin(portal: LoginPortal): Promise<void> {
+  const stage = (value: DiagnosticEvent["stage"]) => reportDiagnostic({
+    level: "info", code: "STAGE_STARTED", portal: portal.id, stage: value,
+  });
+  stage("CONFIGURATION");
   const settings = readLoginSettings(portal);
+  stage("AUTH_DIRECTORY");
   await loginStep("STORAGE: Cannot prepare the private authentication directory. Check ownership and permissions.", () => prepareAuthDirectory());
+  stage("BROWSER_LAUNCH");
   const browser = await loginStep("BROWSER: Chromium could not launch. Check its installation and, for headed mode, desktop availability.", () => chromium.launch({
     headless: !settings.headed, chromiumSandbox: true,
   }));
@@ -111,15 +132,18 @@ export async function runPortalLogin(portal: LoginPortal): Promise<void> {
     await restrictPortalNavigation(context, new URL(portal.loginUrl).origin, portal.authenticationOrigins);
     const page = await context.newPage();
     page.setDefaultTimeout(30_000);
+    stage("LOGIN_NAVIGATION");
     await loginStep("NAVIGATION: The public login page could not load. Check connectivity and portal availability.",
       () => page.goto(portal.loginUrl, { waitUntil: "domcontentloaded" }));
     if (new URL(page.url()).origin !== new URL(portal.loginUrl).origin) {
       throw new LoginDiagnostic("NAVIGATION: Unexpected login destination; credentials were not submitted.");
     }
     if (settings.manual) {
+      stage("LOGIN_VERIFY");
       console.log(`Complete ${portal.name} login in the browser within ${settings.timeout / 1000} seconds, including any required verification.`);
       await portal.confirm(page, settings.successSelector, settings.timeout);
     } else {
+      stage("LOGIN_FORM");
       await loginStep("FORM: Could not fill or submit the expected login controls. The form may have changed.",
         () => portal.submit(page, settings.username!, settings.password!, settings.successSelector, settings.timeout));
     }
@@ -129,7 +153,7 @@ export async function runPortalLogin(portal: LoginPortal): Promise<void> {
 }
 
 export function reportLoginFailure(error: unknown): void {
-  console.error(error instanceof LoginDiagnostic ? error.message :
+  console.error(error instanceof LoginDiagnostic || error instanceof DiagnosticLogError ? error.message :
     "INTERNAL: Login or session persistence failed. Raw error details were withheld to protect account data.");
   console.error("Run did not complete successfully; any existing session file may be stale.");
   process.exitCode = 1;

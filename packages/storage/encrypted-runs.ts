@@ -5,6 +5,7 @@ import path from "node:path";
 import { messageRunSchema, type MessageRun } from "@schoolhawk/core/messages";
 import type { MessageStore } from "./messages";
 import { checkPrivatePath } from "./private-files";
+import { DiagnosticLogError, diagnosticErrorType, reportDiagnostic } from "@schoolhawk/core/diagnostics";
 
 export function encryptRun(run: MessageRun, key: Buffer) {
   const iv = randomBytes(12);
@@ -24,7 +25,7 @@ export async function importEncryptedRuns(directory: string, accountId: string, 
   checkPrivatePath(directory, true);
   const files = (await readdir(directory)).filter(name => name.endsWith(".json.enc")).sort();
   const summary = { files: files.length, imported: 0, alreadyImported: 0, verified: 0, rejected: 0 };
-  for (const name of files) {
+  for (const [index, name] of files.entries()) {
     try {
       const filePath = path.join(directory, name);
       checkPrivatePath(filePath);
@@ -36,9 +37,14 @@ export async function importEncryptedRuns(directory: string, accountId: string, 
       else summary.alreadyImported++;
       if (!isDeepStrictEqual(store.getRun(accountId, run.runId), run)) throw new Error("Stored run differs from source.");
       summary.verified++;
-    } catch {
+    } catch (error) {
+      if (error instanceof DiagnosticLogError) throw error;
       summary.rejected++;
+      reportDiagnostic({ code: "IMPORT_REJECTED", section: "storage", record: index + 1, errorType: diagnosticErrorType(error) });
     }
   }
+  reportDiagnostic({ level: summary.rejected ? "warn" : "info", code: "IMPORT_SUMMARY", section: "storage",
+    status: summary.rejected ? summary.verified ? "partial" : "failed" : "complete",
+    counts: { scanned: summary.files, accepted: summary.verified, skipped: summary.rejected } });
   return summary;
 }

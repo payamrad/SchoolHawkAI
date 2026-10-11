@@ -2,6 +2,7 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { createInterface } from "node:readline/promises";
 import { withWorkspaceStore, type SqliteCanvasStore } from "@schoolhawk/storage/canvas-sqlite";
+import { reportDiagnostic } from "@schoolhawk/storage/diagnostics";
 
 const HELP = `Canvas assignment data and correlation (local database only)
 
@@ -123,6 +124,7 @@ export async function runCanvasCli(args: string[], root = path.resolve(__dirname
     throw new CanvasCliUsageError("Confirmation needs an interactive terminal or explicit --yes. Review scopes and matches first.");
   }
   await withWorkspaceStore(root, async store => {
+    reportDiagnostic({ level: "info", code: "STAGE_STARTED", stage: "CLI_COMMAND" });
     const result = await executeCanvasCommand(store, input, async prompt => {
       const terminal = createInterface({ input: process.stdin, output: process.stdout });
       try { return (await terminal.question(prompt)).trim() === "CONFIRM"; }

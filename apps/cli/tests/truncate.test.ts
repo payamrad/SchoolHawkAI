@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -67,6 +67,13 @@ test("Messages prints bounded deduplicated stored content without changing recor
       await runCli(["Messages", "--account", "empty", "--", "10"], root);
       assert.deepEqual(JSON.parse(output.pop()!), []);
       assert.deepEqual(store.listRuns("parent"), before);
+      const logs = readdirSync(path.join(root, "logs"));
+      assert.equal(logs.length, 2);
+      for (const file of logs) {
+        const log = readFileSync(path.join(root, "logs", file), "utf8");
+        assert.match(log, /COMMAND_COMPLETED/);
+        assert.doesNotMatch(log, /Synthetic|example\.test|bodyText|sender|subject/);
+      }
     } finally { store.close(); key.fill(0); }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -111,6 +118,12 @@ test("CLI entry point truncates an isolated database without creating missing st
   const args = ["Truncate", "--LoginNotification", "--account", "parent"];
   try {
     await assert.rejects(() => runCli([...args, "--yes"], root));
+    assert.equal(existsSync(path.join(root, "data")), false);
+    const failedLog = readdirSync(path.join(root, "logs"))[0];
+    const diagnostic = readFileSync(path.join(root, "logs", failedLog), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.equal(diagnostic.at(-1).code, "COMMAND_FAILED");
+    assert.equal(diagnostic.at(-1).stage, "DATABASE_OPEN");
+    assert.equal(diagnostic.at(-1).errorType, "missing-file");
     setupDatabase(root);
     const key = readFileSync(path.join(root, "playwright/.auth/messages.key"));
     const databasePath = path.join(root, "data/database/schoolhawk.sqlite");

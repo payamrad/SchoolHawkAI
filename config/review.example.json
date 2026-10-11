@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "profileId": "family",
+  "timeZone": "America/Los_Angeles",
+  "sources": [
+    { "portal": "skyward", "accountId": "skyward-parent", "sections": ["assignments", "grades", "messages"] },
+    { "portal": "canvas", "accountId": "canvas-parent", "sections": ["assignments"] }
+  ],
+  "children": [
+    {
+      "id": "student-a",
+      "bindings": [
+        { "portal": "skyward", "accountId": "skyward-parent", "studentId": "REPLACE_WITH_SKYWARD_ID" },
+        { "portal": "canvas", "accountId": "canvas-parent", "studentId": "REPLACE_WITH_CANVAS_ID" }
+      ]
+    }
+  ],
+  "rules": {
+    "dueSoonHours": 24,
+    "upcomingDays": 7,
+    "staleAfterHours": 36,
+    "failureThreshold": 3,
+    "removalConfirmations": 2,
+    "immediateDeadlineAlerts": false,
+    "immediateOperationalAlerts": false
+  },
+  "briefing": { "recentHours": 24, "maxItems": 40, "maxBytes": 32768 }
+}

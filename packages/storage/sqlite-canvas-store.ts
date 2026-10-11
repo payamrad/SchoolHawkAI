@@ -12,11 +12,14 @@ import type { CanvasAssignmentStore, CanvasRunSummary, CanvasCorrelationProposal
   CanvasMatchOptions, CanvasMatchRun, CanvasMatchItem } from "./canvas-assignments";
 import type { CanvasMatchReason, StoredAssignment } from "./assignments";
 import { checkPrivatePath } from "./private-files";
+import { diagnosticStageSchema, reportDiagnostic } from "@schoolhawk/core/diagnostics";
 
 const courseMetadataSchema = z.object({ student: canvasStudentIdentitySchema, course: canvasCourseIdentitySchema });
 
-export async function withWorkspaceStore<Result>(root: string, operation: (store: SqliteCanvasStore) => Result | Promise<Result>,
-  onStage: (stage: string) => void = () => {}): Promise<Result> {
+export async function withWorkspaceDatabase<Result>(root: string, operation: (file: string, key: Buffer) => Result | Promise<Result>,
+  onStage: (stage: string) => void = stage => reportDiagnostic({
+    level: "info", code: "STAGE_STARTED", section: "storage", stage: diagnosticStageSchema.parse(stage),
+  })): Promise<Result> {
   process.umask(0o077);
   const auth = path.join(root, "playwright/.auth");
   const database = path.join(root, "data/database/schoolhawk.sqlite");
@@ -30,10 +33,17 @@ export async function withWorkspaceStore<Result>(root: string, operation: (store
   try {
     if (key.length !== 32) throw new Error("Invalid encryption key.");
     onStage("DATABASE_OPEN");
-    const store = new SqliteCanvasStore(database, key);
+    return await operation(database, key);
+  } finally { key.fill(0); }
+}
+
+export async function withWorkspaceStore<Result>(root: string, operation: (store: SqliteCanvasStore) => Result | Promise<Result>,
+  onStage?: (stage: string) => void): Promise<Result> {
+  return withWorkspaceDatabase(root, async (file, key) => {
+    const store = new SqliteCanvasStore(file, key);
     try { return await operation(store); }
     finally { store.close(); }
-  } finally { key.fill(0); }
+  }, onStage);
 }
 
 export class SqliteCanvasStore extends SqliteMessageStore implements CanvasAssignmentStore {

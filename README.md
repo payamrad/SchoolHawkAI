@@ -6,8 +6,9 @@ for the architecture and staged delivery plan.
 ## Workspace Layout
 
 - `apps/collector`: Skyward messages/assignments/grades, Canvas assignments, and protected portal login.
-- `apps/cli`: user-facing `Messages` and `Truncate` commands; provisional storage utilities also remain here.
-- `packages/core/schemas`: Zod schemas and shared TypeScript message, assignment, grade, and run types.
+- `apps/cli`: local inspection, Canvas matching, `Review`, and narrowly scoped cleanup commands.
+- `packages/core`: Zod contracts, deterministic review/change detection, priorities, and source matching.
+- `packages/briefing`: bounded provider-neutral briefing input and a deterministic text fallback.
 - `packages/storage`: persistence interfaces, SQLite implementation, migrations,
   encryption helpers, and Vitest tests.
 - `config`: public portal URLs.
@@ -70,6 +71,219 @@ npm run canvas:assignments -- --account canvas-parent
 Login requires locally supplied credentials. See
 [apps/collector/README.md](apps/collector/README.md) for login and collection details.
 Tests use synthetic data and do not contact school portals.
+
+## Fault Tolerance and Local Diagnostics
+
+Collection is best-effort within the authorized scope. A malformed record or an
+unverifiable student/course response does not stop independent valid records,
+students, or courses from being processed. Recoverable failures are logged at the
+record or scope boundary. Unknown optional values remain unknown; records with
+untrustworthy identities are not assigned to a guessed student or course.
+
+Best-effort does not mean an incomplete run is reported as complete. Skipped
+records, uncertain state, unverified pagination, and missing coverage remain
+visible as `partial` or `failed`. Successfully parsed observations are retained,
+but incomplete scopes do not replace complete baselines or imply deletion.
+Collector commands still exit nonzero for incomplete coverage. Authentication
+failures, unsafe destinations, collection limits, and storage/key failures remain
+explicit stopping conditions rather than being converted into empty success.
+
+Login, collection, CLI, and storage commands print a diagnostic file path to
+stderr. Each execution writes a private Pino JSON-lines log under:
+
+```text
+logs/YYYY-MM-DD-<operation-id>.jsonl
+```
+
+These logs do not require a database, session, or encryption key, so preflight
+failures can also be investigated. The directory is `0700`, files are `0600`, and
+the entire directory is ignored by Git. Log creation never replaces an existing
+file. Help commands do not require or create logs.
+
+Events include timestamps, command/operation IDs, collection run IDs, processing
+stages, fixed error codes, student/course/record ordinals, and structural counts
+or flags. For example, grade-response diagnostics distinguish missing,
+conflicting, and ambiguous student binding instead of only reporting an npm
+lifecycle failure. Inspect the file printed by the failed command before rerunning
+collection.
+
+Log fields are allowlisted. Names, portal student IDs, grades, message bodies,
+credentials, raw HTML, URLs, and raw exception messages/stacks are not logged.
+Logs describe why validation failed; they are not raw snapshots of school records.
+Explicit data-query commands can still print private plaintext to stdout.
+
+Warnings/errors are flushed immediately, and logs are flushed and closed on
+command completion or failure. Failure to create or write the private diagnostic
+log is an explicit error. Repeated detail events are capped at 2,000 per execution;
+final run/command outcomes and a suppressed-event count remain available.
+Starting a logged command removes recognized logs older than seven days and
+prunes excess older files toward a 100-file limit. Files modified within the
+last hour are protected from count-based pruning so concurrent commands retain
+their active logs.
+
+Existing runs cannot gain diagnostics retroactively. Programmatic callers can
+use `withLocalDiagnostics` from `@schoolhawk/storage/diagnostics` to obtain the same
+logging lifecycle; collection helpers emit sanitized warnings when called without
+a logging context.
+
+## Deterministic Review and Briefing Input
+
+The local review pipeline consumes stored observations, not browser pages or model
+responses. It does not log in, collect new data, call Azure/OpenClaw, send email/SMS,
+or create notification jobs. Collection, review, summarization, and delivery remain
+separate permissions and execution steps.
+
+### Configure the authorized review scope
+
+Create a private local configuration, then edit its account aliases and student IDs
+using your existing stored source identities:
+
+```bash
+install -m 600 config/review.example.json config/review.local.json
+```
+
+`config/review.local.json` is ignored by Git. The CLI rejects non-private files,
+symlinks, invalid configuration, duplicate sources, and conflicting child bindings.
+Never put credentials in this file. `children[].id` should be a local pseudonym;
+bindings explicitly associate that child with portal/account/student IDs. No names
+are used to infer identity. Missing bindings remain visible as `unmapped-student`.
+Existing confirmed Canvas/Skyward assignment links are reused; review never creates
+new mappings or matches.
+
+Choose only the accounts and sections you intend to review. Assignments from both
+portals, Skyward grades, and Skyward messages are supported. Configuring attendance,
+calendar, announcements, forms, or another unsupported portal/section combination
+produces an explicit unsupported-coverage warning, not an empty success.
+
+`profileId` names an independent review baseline. After first use, changing its
+source selection or child bindings requires a new profile ID. Rules and briefing
+limits can be changed without resetting baselines. The old profile and its audit
+history remain intact.
+
+### Run and inspect
+
+```bash
+npm run cli -- Review run --config config/review.local.json
+npm run cli -- Review status --profile family
+npm run cli -- Review changes --profile family --limit 100 --offset 0
+npm run cli -- Review priorities --profile family --limit 100
+npm run cli -- Review briefing --config config/review.local.json
+npm run cli -- Review briefing --config config/review.local.json --text
+npm run cli -- Review source --profile family --review <review-id> --source <source-id>
+npm run cli -- Review --help
+```
+
+`run` processes newly stored observations and saves an encrypted evaluation.
+`briefing` also reevaluates clock-based priorities before printing its input.
+Inspection commands read saved evaluations; their `evaluatedAt` is not a promise
+of current portal state. Query limits default to 100 and are capped at 1000.
+Help does not require a database, configuration, key, or diagnostic log.
+
+For a machine-readable JSON stream without npm's lifecycle banners:
+
+```bash
+node --import tsx apps/cli/src/index.ts Review briefing --config config/review.local.json
+```
+
+Diagnostics go to stderr/private logs, not the JSON stream. Exit zero means that
+local processing produced a valid result, **not** that all school information was
+collected successfully. Consumers must inspect `conclusion`, coverage, notices,
+and omission counts. Explicit local inspection may print private plaintext.
+
+### Change and baseline semantics
+
+- Initial processing establishes baselines from retained history and labels active
+  records `first-observed`. It does not backfill a stream of historical change alerts.
+- Subsequent events are `newly-observed`, `updated`, `no-longer-observed`, or
+  `reappeared`, with stable IDs, semantic field differences, and before/after source
+  references. Newly observed is **not** a claim that the portal just posted an item.
+- Whitespace, collection timestamps, and presentation-only changes do not create
+  semantic events. Unknown grades/scores remain unknown, never zero.
+- Complete sections advance independently. Partial/failed sections cannot overwrite
+  complete review records. Conflicting same-ID observations do not advance a baseline.
+- Date-window expansion is not treated as newly posted old work. Late or equal-time
+  observations cannot rewind a stream: they are retained in source storage, skipped
+  by the review checkpoint, and reported with `late-observations-ignored`.
+- Absence requires two consecutive comparable complete observations by default.
+  Skyward assignment checks require all three lists and an item still inside the
+  comparable past window; moves between lists and shrinking windows are not removal.
+  Canvas/grade scope or term changes cannot remove records from an older scope.
+  No message removals are inferred. `no-longer-observed` never means completed,
+  submitted, or deleted in the portal.
+- Read-state changes describe observations only. Opening messages can itself mark
+  them read; review does not attribute that change to the parent.
+- Collection status transitions (including authentication failure and recovery)
+  are recorded once as deterministic events; ongoing health warnings still
+  appear on later evaluations without duplicating those transition events.
+- If reviewed source history changes through explicit cleanup, processing stops
+  with an actionable error. Use a new profile ID to rebuild from retained records.
+  Saved review evaluations/events are separate encrypted audit history; message
+  truncation does not delete them or backups.
+
+Migration 007 stores review profiles/checkpoints, immutable events, and immutable
+evaluation snapshots. They use existing AES-GCM/HMAC protections and the original
+key. Events, state advancement, and evaluation save commit in one SQLite write
+transaction. Identical retries do not duplicate events. Source observations are
+never rewritten by review. Backups include review history.
+
+Safety limits are explicit errors, not silent truncation: 20,000 source runs per
+profile, 200,000 newly processed records or 50 MiB of normalized input per batch,
+100,000 tracked records, and 10,000 scopes. Review requires non-future observations
+and a clock no earlier than its retained state.
+
+### Priority policy
+
+Defaults are 24 hours for exact imminent deadlines, seven days for upcoming work,
+36 hours for stale collection, three consecutive collection failures for operational
+escalation eligibility, and two comparable absences for disappearance confirmation.
+`children[].rules` can override individual settings without replacing other defaults.
+
+- Missing work is high priority. An unknown missing flag cannot clear a previously
+  verified missing-work concern; its older evidence and uncertainty remain visible.
+- Exact deadlines within 24 hours and date-only deadlines today/tomorrow are high.
+  Date-only Skyward deadlines remain Pacific calendar dates, not invented midnight
+  timestamps. Exact timestamps use elapsed time, including across DST.
+- Upcoming work is normal priority. A non-missing assignment already exposing a
+  grade/score is not repeatedly described as pending solely because of its deadline;
+  this does not assert that it was submitted.
+- Ordinary grade changes and newly observed unread messages are normal daily items.
+  No message text is interpreted as urgent.
+- Failed/stale coverage and source conflicts are prominent operational warnings.
+  Linked source values remain separate; Skyward marks are never replaced by Canvas.
+
+Importance and delivery eligibility are separate. Both immediate-alert switches
+default to false. Opting in only marks eligible candidates: newly discovered,
+fresh, exact deadlines inside the urgent window, or threshold-crossing collection
+failures. This phase performs **no delivery**. Quiet hours, a notification outbox,
+delivery retries/rate limits, and provider integration are later work.
+
+### Provider-neutral boundary
+
+Programmatic callers can use `ReviewStore` / `SqliteReviewStore.processReview`,
+then `buildBriefingInput(review)` from `@schoolhawk/briefing`. Neither requires a
+model SDK, credentials, prompts, browser, or notification provider.
+
+`briefingInputSchema` validates the versioned output, source/child references, limits,
+and qualified conclusions. `serializeBriefingInput` returns compact JSON.
+The default limits are 40 items and **32,768 UTF-8 JSON bytes**, not an estimated
+token budget. The CLI also reserves room for its newline. High-priority items sort
+first; omitted items, high-priority counts, health details, and shortened text are
+explicit. Truncated input cannot claim no material changes.
+
+The payload uses `child-1`, `child-2`, etc., ordered by configured child pseudonym,
+and opaque source references. It contains minimized facts, deterministic reasons,
+effective rule parameters, before/after changes, dates, extraction confidence, and coverage/freshness warnings.
+Account aliases, portal student IDs, source URLs, names from identity records,
+full message bodies, raw HTML, and instruction bodies are not exported.
+Source links and identity mapping stay local and can be inspected with `Review source`.
+
+**Minimized is not anonymized:** assignment titles, course labels, marks, and other
+selected source text may still contain personal information. All source text remains
+untrusted data, never system instructions or authorization to use tools. Approve the
+provider, fields, retention policy, and delivery channel before transmitting anything.
+An eventual Azure AI Foundry or OpenClaw adapter can consume the same contract.
+Validating/saving model reports and email/SMS delivery are deliberately not implemented.
+`renderDeterministicBriefing` / `--text` provides a local model-free fallback.
 
 ## Canvas Login
 
@@ -330,8 +544,8 @@ deletion. Output contains counts and coverage, not names or marks.
 accept an optional portal `studentId`, and have a bounded `limit` (1-1000,
 default 100). `getGradeRun` reconstructs the full snapshot, including incomplete
 student results. Stored grades are last-observed values: consult timestamps and
-run health before treating them as current. No grade-change events or alerts
-are generated yet.
+run health before treating them as current. The separate `Review` pipeline generates
+deterministic grade-change events; the collector itself does not generate alerts.
 
 ## CLI
 
@@ -465,9 +679,9 @@ do not imply deletion or establish a complete all-message baseline. Read status
 is the observed status before opening, not a claim about the current portal.
 Consumers must consult run health and selection when presenting completeness.
 
-The schema supports Skyward messages, student-scoped assignments, and course
-grade snapshots. Mapping portal students to household profiles, change events,
-and prioritization are not implemented yet.
+The source schema supports Skyward messages, student-scoped assignments, and course
+grade snapshots. The separate `Review` pipeline adds explicitly configured child
+bindings, deterministic change events, priorities, and bounded briefing input.
 
 The same `SqliteMessageStore` also implements `AssignmentStore`, with
 `importAssignmentRun`, `getAssignmentRun`, `listAssignmentRuns`, and
@@ -477,8 +691,8 @@ deduplicates by account, student, and assignment ID using complete section
 observations, including complete sections from otherwise partial runs.
 `getAssignmentRun` returns the full validated snapshot with all student coverage.
 Stored assignments are last-observed records, not a claim about current portal
-state; consult run coverage and observation timestamps. No removals or semantic
-change events are inferred.
+state; consult run coverage and observation timestamps. These source queries do not
+infer removals or changes; `Review` maintains its own conservative derived history.
 
 ### Persistence and Protection
 
@@ -504,8 +718,11 @@ change events are inferred.
 - `canvas_assignments`: stable, account/student/course-scoped Canvas identity index across observation runs.
 - `skyward_assignments`: stable Skyward identity index, matching status/reason/attempts, and a unique nullable Canvas foreign key.
 - `canvas_match_runs`: encrypted, append-only batch decisions with source-run references and matching policy.
+- `review_profiles`: encrypted source checkpoints, scope baselines, and last-known review records.
+- `review_events`: encrypted, append-only semantic and collection-health transitions.
+- `review_evaluations`: encrypted, append-only priority/coverage snapshots with policy and evidence references.
 
-Migrations 001 through 006 run transactionally. Existing version-1 through version-5 databases upgrade
+Migrations 001 through 007 run transactionally. Existing version-1 through version-6 databases upgrade
 on open after key verification. Unknown future schema versions are rejected.
 Each run and its observations/audit event commit together. Foreign keys, WAL,
 a 5-second busy timeout, and full synchronous durability are enabled.

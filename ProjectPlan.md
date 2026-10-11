@@ -1,14 +1,14 @@
 # SchoolHawkAI Project Plan
 
-Updated: 2026-09-12
+Updated: 2026-10-11
 
-Status: Approved design direction; implementation and portal compatibility remain to be verified.
+Status: Local collection, storage, deterministic review, and briefing-input slices are implemented. Live portal compatibility, downstream summarization/delivery, and unattended-deployment acceptance gates remain to be verified.
 
 ## 1. Purpose and Product Boundary
 
 SchoolHawkAI is a private family school-monitoring system hosted on a Raspberry Pi. It collects information from authorized school and childcare accounts, detects meaningful changes, and produces evidence-backed briefings for Nicole, Zach, and Evander.
 
-The governing principle is: **Playwright observes, application code determines changes, OpenClaw explains, and the parent decides whether to act.**
+The governing principle is: **Playwright observes, application code determines changes, an approved summarizer explains, and the parent decides whether to act.**
 
 The system will collect the following where the portal permits access and the collector can do so without unapproved side effects:
 
@@ -48,7 +48,9 @@ Authorized portals / approved APIs / calendar feeds
                         |
           Minimized, validated briefing input
                         |
-             Restricted OpenClaw skill
+         Provider-neutral briefing-input contract
+                        |
+        Approved Azure API adapter / OpenClaw
                         |
       Daily briefing / urgent alerts / optional UI
 ```
@@ -62,9 +64,10 @@ Short-lived encrypted raw snapshots are an optional evidence branch, not a prere
 | Application core | Validation, identity, deduplication, dates, changes, priorities, retention, redaction | Depend on an LLM for correctness |
 | Storage | Transactions, history, run status, provenance, encrypted evidence references | Silently replace good data with incomplete observations |
 | OpenClaw | Restricted orchestration, grounded summaries, questions, approved delivery | Receive credentials, raw HTML, or arbitrary execution capabilities |
+| Direct model adapter | Send approved minimized briefing input and return structured report data | Determine changes/priorities or obtain collector credentials |
 | Parent | Authenticate, approve collection scope, verify claims, act in the portal | Delegate unrestricted account access to the model |
 
-Separate collection, summarization, and notification permissions. The collector does not need model API credentials or notification credentials. OpenClaw receives only the tool operations and data needed for briefing.
+Separate collection, summarization, and notification permissions. The collector does not need model API credentials or notification credentials. Any summarization consumer receives only the operations and data needed for briefing. OpenClaw is optional; a direct Azure AI Foundry integration must use the same boundary.
 
 ## 3. Platform and Repository
 
@@ -182,6 +185,12 @@ Before generating sensitive artifacts, ignore `.env` files except sanitized exam
 
 Logs contain run IDs, portal IDs, section status, durations, and sanitized error codes. Do not log message bodies, child names, student IDs, passwords, cookies, tokens, authenticated URLs with sensitive queries, or full browser/network error dumps.
 
+The implemented local diagnostics use private, Git-ignored `logs/` JSON-lines
+files with allowlisted metadata, per-command/run correlation, bounded detail,
+and seven-day retention. Persist recoverable record/scope failures as they occur,
+including structural validation reasons, so troubleshooting does not require
+repeating an entire collection. These logs are not raw source evidence.
+
 External model use is opt-in and must name the provider and approved retention/privacy settings. Send only minimized normalized fields with pseudonymous child identifiers where possible. Keep evidence and identity mapping local. Notification channels must also be approved; prefer minimal alerts with a private local reference over complete educational records.
 
 ## 5. Domain Model and Identity
@@ -230,6 +239,14 @@ Each section returns a discriminated result with:
 - Evidence for explicit emptiness, pagination completion, and relevant source metadata.
 
 A `complete` result with zero records requires a positively verified empty state. Loading failures, missing selectors, inaccessible child data, and unfinished pagination are not empty results. Partial records may be retained as observations, but they do not replace a complete baseline or imply removals.
+
+Process independent records and scopes after a recoverable parsing failure.
+Preserve unknown optional values where the canonical schema permits them, skip
+records whose identity or scope cannot be trusted, and log each failure with
+bounded structural context. Do not abandon later valid rows because an earlier
+row was invalid. Authentication, unsafe navigation, resource limits, and storage
+integrity failures still stop the affected operation explicitly. Finishing this
+best-effort work does not turn incomplete coverage into a `complete` result.
 
 Distinguish unsupported sections agreed during setup from expected sections that unexpectedly fail. The run summary reports both coverage and failures, with per-account, per-child, and per-section status.
 
@@ -294,7 +311,35 @@ Urgent notifications use configurable quiet-hour exceptions, deduplication, and 
 
 Provide a deterministic template-based briefing when the model is offline. Collection, changes, priority rules, and approved urgent notifications must continue without an LLM.
 
-### OpenClaw Integration
+### Provider-Neutral Briefing Input (Implemented Local Slice)
+
+The deterministic review engine and briefing-input builder have no model/provider
+dependency. Local `Review` commands process stored Skyward/Canvas assignments,
+Skyward grades/messages, and collection health. Explicit configuration supplies
+account scope, child bindings, rules, and payload limits.
+
+Migration 007 persists encrypted checkpoints, idempotent immutable events, and
+evaluation snapshots transactionally. First processing establishes baselines rather
+than announcing historical changes as new. Complete sections advance independently;
+partial scopes, filtering, period changes, and ambiguous identities cannot establish
+false removals. Late observations are reported and do not rewind current state.
+
+The `@schoolhawk/briefing` contract exposes pseudonymous children, opaque locally
+resolvable evidence references, minimized facts, deterministic priorities, and
+coverage/uncertainty metadata. Default limits are 40 items and 32,768 UTF-8 JSON
+bytes, with explicit omission counts and no unqualified all-clear on incomplete
+or truncated input. It also supports deterministic local text output.
+
+This implements the local change/priority and structured-input stages only.
+Attendance/calendar/form collection, semantic urgency from teacher text, hosted
+model calls, report validation/storage, scheduling, and email/SMS delivery remain
+outside this slice. Immediate-delivery eligibility is opt-in and sends nothing.
+Review audit history has no automatic retention/deletion job yet.
+
+See [README.md](README.md#deterministic-review-and-briefing-input) for commands,
+configuration, supported comparisons, privacy limits, and recovery semantics.
+
+### Optional OpenClaw Integration
 
 Expose a narrow `school-review` skill with schema-validated operations: `collect`, `status`, `changes`, `briefing`, `child-summary`, `upcoming`, and `explain-source`.
 
@@ -355,9 +400,9 @@ Implement configurable deadlines, timezone handling, urgency rules, template bri
 
 Exit gate: stale and incomplete scopes are clear; routine items do not trigger urgent noise; first-run items are described accurately; deterministic outputs work without a model.
 
-### Phase 6: Restricted OpenClaw Integration
+### Phase 6: Approved Summarization Adapter
 
-Implement the narrow skill, data minimization, source-grounded summary schema, output validation, injection tests, and model-outage fallback. Approve any external provider and delivery channel before sending real records.
+Implement a direct Azure AI Foundry adapter or the optional narrow OpenClaw skill against the provider-neutral input contract. Add a source-grounded report schema, output validation/storage, injection tests, and model-outage fallback. Approve the external provider and delivery channel before sending real records.
 
 Exit gate: agent cannot obtain secrets, browse arbitrarily, run arbitrary commands, or mutate portal data; actionable claims reference known evidence; model failures do not break collection or deterministic alerts.
 
@@ -463,7 +508,7 @@ Ordered starting backlog:
 - Every actionable claim has a valid source reference, capture time, and appropriate confidence.
 - Partial failures and stale data never produce an unqualified all-clear report.
 - No prohibited state-changing operation is available to the collector or agent.
-- OpenClaw has minimized, restricted access and cannot initiate arbitrary browsing or shell execution.
+- The summarization adapter has minimized, restricted access; OpenClaw, if used, cannot initiate arbitrary browsing or shell execution.
 - Collection, deterministic changes, and approved rule-based alerts work when the model is unavailable.
 - Secrets and real student artifacts are absent from Git; permissions, encryption, redaction, and retention controls are verified.
 - Backup and restore, authentication expiry, and portal-layout failures have been tested.

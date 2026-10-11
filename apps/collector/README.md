@@ -217,6 +217,25 @@ In particular, short lookbacks can still miss corrections to older past work;
 use a wider explicit window for recovery. Canvas login is not a new scheduler or
 collector, and it has no database dependency.
 
+### Best-Effort Collection and Persistent Logs
+
+Collectors isolate recoverable parsing failures to the affected record or scope
+and continue with the remaining verified data. A malformed row, an unknown
+optional field, or one unbound student response must not discard independent
+valid observations. Identity and scope are never guessed to make a run pass.
+Incomplete scopes remain partial/failed, and the command still exits nonzero
+when expected coverage could not be verified. Authentication, unsafe navigation,
+resource limits, and storage failures remain explicit stopping conditions.
+
+Each command prints the path of its private `logs/<date>-<operation-id>.jsonl`
+diagnostic file. It records processing stages, run IDs, fixed rejection codes,
+record/student/course ordinals, and structural counts without storing school
+content, credentials, raw responses, or raw exception dumps. Warnings/errors
+are flushed as they occur, so a later failure does not erase the diagnostic
+trail. See the root [logging documentation](../../README.md#fault-tolerance-and-local-diagnostics)
+for permissions, retention, bounded detail, and programmatic use. These logs
+apply to future executions; they cannot reconstruct errors from older runs.
+
 ## Collect Messages for N Days
 
 ```bash

@@ -1,5 +1,6 @@
 import type { Page } from "playwright";
 import { z } from "zod";
+import { DiagnosticLogError, diagnosticErrorType, reportDiagnostic, type DiagnosticEvent } from "@schoolhawk/core/diagnostics";
 import type { MessageRun } from "@schoolhawk/core/messages";
 import type { SqliteMessageStore } from "@schoolhawk/storage/sqlite";
 import { readPortalSession, withPortalCollection, type CollectionOptions } from "./portal-collection";
@@ -56,24 +57,96 @@ export function parseStudentName(parts: string[]): { name: string; firstName: st
 
 export type SkywardStudent = ReturnType<typeof parseStudentName> & { id: string };
 
-export async function discoverSkywardStudents(page: Page, widget: "assignmentsList" | "studentGrades", timeout: number): Promise<Map<string, SkywardStudent>> {
-  await page.locator(`a[id="-${widget}_Widget"][data-studentid=""]`).waitFor({ timeout });
-  const candidates = await page.locator('.familyAccessHeaderSelectTile[data-studentid]').evaluateAll(elements => elements.map(element => ({
-    id: element.getAttribute("data-studentid") ?? "",
-    parts: [...element.querySelectorAll(".familyAccessStudentNameText")].map(part => part.textContent ?? ""),
-  })).filter(student => student.id));
+export async function discoverSkywardStudents(page: Page, widget: "assignmentsList" | "studentGrades", timeout: number,
+  context: Pick<DiagnosticEvent, "runId" | "parserVersion"> = {},
+): Promise<{ students: Map<string, SkywardStudent>; complete: boolean; ordinals: Map<string, number> }> {
   const students = new Map<string, SkywardStudent>();
-  for (const candidate of candidates) {
-    const student = { id: candidate.id, ...parseStudentName(candidate.parts) };
-    if (!/^\d+$/.test(student.id) || (students.has(student.id) && students.get(student.id)!.name !== student.name)) {
-      throw new Error("Unverified student identity.");
+  const ordinals = new Map<string, number>();
+  const conflicted = new Set<string>();
+  let complete = true;
+  const report = (event: DiagnosticEvent) => reportDiagnostic({ ...context, portal: "skyward", section: "students", ...event });
+  try {
+    await page.locator(`a[id="-${widget}_Widget"][data-studentid=""]`).waitFor({ timeout });
+  } catch (error) {
+    if (error instanceof DiagnosticLogError) throw error;
+    complete = false;
+    report({ code: "SCOPE_MISSING", field: "scope", errorType: diagnosticErrorType(error) });
+  }
+  let candidates: { id: string; parts: string[] }[] = [];
+  try {
+    candidates = await page.locator('.familyAccessHeaderSelectTile[data-studentid]').evaluateAll(elements => elements.map(element => ({
+      id: element.getAttribute("data-studentid") ?? "",
+      parts: [...element.querySelectorAll(".familyAccessStudentNameText")].map(part => part.textContent ?? ""),
+    })));
+  } catch (error) {
+    if (error instanceof DiagnosticLogError) throw error;
+    complete = false;
+    report({ code: "SCOPE_FAILED", errorType: diagnosticErrorType(error) });
+  }
+  for (const [index, candidate] of candidates.entries()) {
+    if (!candidate.id) continue;
+    const ordinal = index + 1;
+    if (!/^\d{1,300}$/.test(candidate.id)) {
+      complete = false;
+      report({ code: "STUDENT_RECORD_INVALID", student: ordinal, field: "id", flags: { hasId: true } });
+      continue;
     }
-    students.set(student.id, student);
+    if (!ordinals.has(candidate.id)) ordinals.set(candidate.id, ordinal);
+    try {
+      const student = { id: candidate.id, ...parseStudentName(candidate.parts) };
+      if ([student.name, student.firstName, student.lastName].some(value => value.length > 1_000_000)) throw new Error();
+      const previous = students.get(student.id);
+      if (conflicted.has(student.id) || (previous && previous.name !== student.name)) {
+        complete = false;
+        students.delete(student.id);
+        conflicted.add(student.id);
+        report({ code: "STUDENT_BINDING_CONFLICT", student: ordinals.get(student.id), record: ordinal,
+          field: "name", flags: { conflicted: true } });
+        continue;
+      }
+      if (previous) {
+        report({ level: "info", code: "DUPLICATE_STUDENT", student: ordinals.get(student.id), record: ordinal,
+          flags: { conflicted: false } });
+      } else students.set(student.id, student);
+    } catch (error) {
+      if (error instanceof DiagnosticLogError) throw error;
+      complete = false;
+      students.delete(candidate.id);
+      conflicted.add(candidate.id);
+      report({ code: "STUDENT_RECORD_INVALID", student: ordinal, field: "name", errorType: diagnosticErrorType(error) });
+    }
   }
-  const widgetIds = await page.locator(`a[id$="-${widget}_Widget"][data-studentid]`).evaluateAll(elements =>
-    elements.map(element => element.getAttribute("data-studentid")!).filter(Boolean));
-  if (!students.size || students.size > 100 || new Set(widgetIds).size !== students.size || widgetIds.some(id => !students.has(id))) {
-    throw new Error("Unverified student coverage.");
+  if (students.size > 100) {
+    complete = false;
+    report({ code: "COLLECTION_LIMIT", expected: 100, actual: students.size });
+    for (const [index, id] of [...students.keys()].entries()) if (index >= 100) {
+      students.delete(id);
+      report({ code: "RECORD_SKIPPED", student: ordinals.get(id), field: "student" });
+    }
   }
-  return students;
+  let widgetIds: string[] = [];
+  try {
+    widgetIds = await page.locator(`a[id$="-${widget}_Widget"][data-studentid]`).evaluateAll(elements =>
+      elements.map(element => element.getAttribute("data-studentid")!).filter(Boolean));
+  } catch (error) {
+    if (error instanceof DiagnosticLogError) throw error;
+    complete = false;
+    report({ code: "SCOPE_FAILED", field: "scope", errorType: diagnosticErrorType(error) });
+  }
+  const widgets = new Set(widgetIds);
+  for (const id of students.keys()) if (!widgets.has(id)) {
+    complete = false;
+    report({ code: "STUDENT_BINDING_MISSING", student: ordinals.get(id), field: "student" });
+  }
+  for (const [index, id] of widgetIds.entries()) if (!students.has(id)) {
+    complete = false;
+    report({ code: "STUDENT_BINDING_MISSING", student: ordinals.get(id), record: index + 1,
+      field: "student", flags: { matched: false } });
+  }
+  if (!students.size) complete = false;
+  if (!complete) {
+    report({ code: "STUDENT_DISCOVERY_UNVERIFIED", counts: { scanned: candidates.length, accepted: students.size,
+      students: widgets.size }, flags: { discoveryComplete: false } });
+  }
+  return { students, complete, ordinals };
 }

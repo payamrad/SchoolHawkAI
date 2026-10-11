@@ -2,6 +2,7 @@
   "name": "@schoolhawk/core",
   "version": "0.0.0",
   "private": true,
-  "exports": { "./messages": "./schemas/messages.ts", "./assignments": "./schemas/assignments.ts", "./grades": "./schemas/grades.ts", "./assignment-correlation": "./assignment-correlation.ts", "./canvas-assignments": "./schemas/canvas-assignments.ts" },
+  "exports": { "./messages": "./schemas/messages.ts", "./assignments": "./schemas/assignments.ts", "./grades": "./schemas/grades.ts", "./assignment-correlation": "./assignment-correlation.ts", "./canvas-assignments": "./schemas/canvas-assignments.ts", "./diagnostics": "./diagnostics.ts", "./review": "./review.ts", "./review-observations": "./review-observations.ts", "./change-detection": "./change-detection.ts", "./prioritization": "./prioritization.ts" },
+  "scripts": { "test": "tsx --test tests/*.test.ts" },
   "dependencies": { "zod": "^4.6.5" }
 }

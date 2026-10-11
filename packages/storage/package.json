@@ -10,12 +10,16 @@
     "./canvas-sqlite": "./sqlite-canvas-store.ts",
     "./sqlite": "./sqlite-message-store.ts",
     "./encrypted-runs": "./encrypted-runs.ts",
-    "./private-files": "./private-files.ts"
+    "./private-files": "./private-files.ts",
+    "./diagnostics": "./diagnostics.ts",
+    "./review": "./review.ts",
+    "./review-sqlite": "./sqlite-review-store.ts"
   },
   "scripts": { "test": "vitest run" },
   "dependencies": {
     "@schoolhawk/core": "0.0.0",
-    "better-sqlite3": "^12.11.1"
+    "better-sqlite3": "^12.11.1",
+    "pino": "^10.0.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",

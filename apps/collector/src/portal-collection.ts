@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { checkPrivatePath } from "@schoolhawk/storage/private-files";
 import { withWorkspaceStore, type SqliteCanvasStore } from "@schoolhawk/storage/canvas-sqlite";
+import { diagnosticErrorType, diagnosticStageSchema, reportDiagnostic, type DiagnosticEvent } from "@schoolhawk/core/diagnostics";
 import portalConfig from "../../../config/portals.json";
 import { restrictPortalNavigation, type PortalId } from "./portal-session";
 
@@ -27,7 +28,12 @@ export function readPortalSession(portal: PortalId, root = ROOT, onStage: (stage
 export async function withPortalCollection<Result>(portal: PortalId, operation: (page: Page, store: SqliteCanvasStore) => Promise<Result>,
   options: CollectionOptions = {}): Promise<{ result: Result; database: string }> {
   const root = options.root ?? ROOT;
-  const onStage = options.onStage ?? (() => {});
+  let currentStage: DiagnosticEvent["stage"] = "CONFIGURATION";
+  const onStage = (stage: string) => {
+    currentStage = diagnosticStageSchema.parse(stage);
+    reportDiagnostic({ level: "info", code: "STAGE_STARTED", portal, stage: currentStage });
+    options.onStage?.(stage);
+  };
   const session = readPortalSession(portal, root, onStage);
   return withWorkspaceStore(root, async store => {
     onStage("BROWSER_LAUNCH");
@@ -40,7 +46,14 @@ export async function withPortalCollection<Result>(portal: PortalId, operation: 
       const page = await context.newPage();
       page.setDefaultTimeout(30_000);
       await page.goto(session.entry.href, { waitUntil: "domcontentloaded" });
+      onStage("COLLECT");
       return { result: await operation(page, store), database: "data/database/schoolhawk.sqlite" };
-    } finally { await browser.close(); }
+    } catch (error) {
+      reportDiagnostic({ level: "error", code: "SCOPE_FAILED", portal, stage: currentStage, errorType: diagnosticErrorType(error) });
+      throw error;
+    } finally {
+      try { reportDiagnostic({ level: "info", code: "STAGE_STARTED", portal, stage: "BROWSER_CLOSE" }); }
+      finally { await browser.close(); }
+    }
   }, onStage);
 }

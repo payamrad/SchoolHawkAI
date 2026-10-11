@@ -9,6 +9,7 @@ import type { GradeRunSummary, GradeStore, StoredGrade } from "./grades";
 import type { AssignmentRunSummary, AssignmentStore, StoredAssignment } from "./assignments";
 import type { MessageStore, RunSummary, StoredMessage, TruncateOptions, TruncateResult } from "./messages";
 import { prepareDatabaseFile } from "./private-files";
+import { diagnosticErrorCode, diagnosticErrorType, reportDiagnostic } from "@schoolhawk/core/diagnostics";
 
 export function checkAccount(accountId: string): void {
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(accountId)) throw new Error("Use a non-sensitive account alias containing letters, digits, underscores, or hyphens.");
@@ -23,7 +24,11 @@ export class SqliteMessageStore implements MessageStore, AssignmentStore, GradeS
   private readonly key: Buffer;
 
   constructor(filePath: string, key: Buffer) {
-    if (key.length !== 32) throw new Error("Storage requires a 32-byte key.");
+    if (key.length !== 32) {
+      reportDiagnostic({ level: "error", code: "STORAGE_KEY_INVALID", section: "storage", stage: "PRIVATE_DATABASE_KEY",
+        expected: 32, actual: key.length });
+      throw new Error("Storage requires a 32-byte key.");
+    }
     this.key = Buffer.from(key);
     if (filePath !== ":memory:") prepareDatabaseFile(filePath);
     this.database = new Database(filePath);
@@ -32,14 +37,20 @@ export class SqliteMessageStore implements MessageStore, AssignmentStore, GradeS
       this.database.pragma("busy_timeout = 5000");
       this.database.transaction(() => {
         const version = this.database.pragma("user_version", { simple: true });
-        if (typeof version !== "number" || ![0, 1, 2, 3, 4, 5, 6].includes(version)) throw new Error("Unsupported database schema version.");
+        if (typeof version !== "number" || ![0, 1, 2, 3, 4, 5, 6, 7].includes(version)) {
+          reportDiagnostic({ level: "error", code: "STORAGE_SCHEMA_UNSUPPORTED", section: "storage", stage: "DATABASE_OPEN" });
+          throw new Error("Unsupported database schema version.");
+        }
         if (version === 0) {
           this.database.exec(readFileSync(path.join(__dirname, "migrations/001-messages.sql"), "utf8"));
           this.database.prepare("INSERT INTO storage_settings VALUES ('key-check', ?)").run(this.hash("schoolhawk-message-storage-v1"));
           this.database.pragma("user_version = 1");
         }
         const setting = this.database.prepare("SELECT value FROM storage_settings WHERE name = 'key-check'").get() as { value: string } | undefined;
-        if (setting?.value !== this.hash("schoolhawk-message-storage-v1")) throw new Error("Incorrect storage key.");
+        if (setting?.value !== this.hash("schoolhawk-message-storage-v1")) {
+          reportDiagnostic({ level: "error", code: "STORAGE_KEY_INVALID", section: "storage", stage: "PRIVATE_DATABASE_KEY" });
+          throw new Error("Incorrect storage key.");
+        }
         if (version < 2) {
           this.database.exec(readFileSync(path.join(__dirname, "migrations/002-truncate.sql"), "utf8"));
           this.database.pragma("user_version = 2");
@@ -60,12 +71,18 @@ export class SqliteMessageStore implements MessageStore, AssignmentStore, GradeS
           this.database.exec(readFileSync(path.join(__dirname, "migrations/006-assignment-link-status.sql"), "utf8"));
           this.database.pragma("user_version = 6");
         }
+        if (version < 7) {
+          this.database.exec(readFileSync(path.join(__dirname, "migrations/007-review.sql"), "utf8"));
+          this.database.pragma("user_version = 7");
+        }
       }).immediate();
       this.database.pragma("journal_mode = WAL");
       this.database.pragma("synchronous = FULL");
     } catch (error) {
       this.database.close();
       this.key.fill(0);
+      reportDiagnostic({ level: "error", code: "STORAGE_OPEN_FAILED", section: "storage", stage: "DATABASE_OPEN",
+        errorType: diagnosticErrorType(error), errorCode: diagnosticErrorCode(error) });
       throw error;
     }
   }
