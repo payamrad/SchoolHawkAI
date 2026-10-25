@@ -208,16 +208,21 @@ test("count-based retention preserves recent logs belonging to concurrent comman
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("diagnostic floods are bounded with an explicit suppression count and final run status", () => {
+test("diagnostic floods retain run and agent outcomes with an explicit suppression count", () => {
   const root = temporaryRoot();
   const log = createDiagnosticLog(root, "canvas:assignments");
   try {
     for (let record = 1; record <= 2100; record++) log.sink({ level: "warn", code: "RECORD_INVALID", record });
     log.sink({ level: "warn", code: "RUN_SUMMARY", status: "partial", counts: { accepted: 1, skipped: 2100 } });
+    log.sink({ level: "info", code: "AGENT_TEST_SUMMARY", stage: "AGENT_RESPONSE", status: "success" });
+    log.sink({ level: "info", code: "AGENT_ANALYSIS_SUMMARY", stage: "AGENT_RESPONSE", status: "success", counts: { students: 2 } });
     log.close();
     const events = readFileSync(log.file, "utf8").trim().split("\n").map(line => JSON.parse(line));
-    assert.equal(events.length, 2002);
-    assert.equal(events.at(-2).status, "partial");
+    assert.equal(events.length, 2004);
+    assert.equal(events[2000].status, "partial");
+    assert.deepEqual(events.slice(2001, 2003).map(event => event.code), ["AGENT_TEST_SUMMARY", "AGENT_ANALYSIS_SUMMARY"]);
+    assert.equal(events.at(-2).counts.students, 2);
+    assert.equal(log.outcome().status, "success");
     assert.equal(events.at(-1).code, "LOG_LIMIT_REACHED");
     assert.equal(events.at(-1).counts.suppressed, 100);
     assert.throws(() => log.sink({ level: "warn", code: "RECORD_INVALID", record: 2101 }), DiagnosticLogError);

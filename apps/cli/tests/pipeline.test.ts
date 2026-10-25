@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -24,6 +24,7 @@ const callSchema = z.object({
   credentials: z.object({ skywardUsername: z.boolean(), skywardPassword: z.boolean(), canvasUsername: z.boolean(), canvasPassword: z.boolean() }),
   credentialMatches: z.object({ skywardUsername: z.boolean(), skywardPassword: z.boolean(), canvasUsername: z.boolean(), canvasPassword: z.boolean() }),
   headed: z.object({ skyward: z.boolean(), canvas: z.boolean() }),
+  azureCredential: z.boolean(),
 });
 const noCredentials = {
   SKYWARD_USERNAME: undefined, SKYWARD_PASSWORD: undefined, CANVAS_USERNAME: undefined, CANVAS_PASSWORD: undefined,
@@ -39,8 +40,10 @@ function harness(settings: ReviewConfig = fullConfig()) {
   const bin = path.join(directory, "bin");
   const configuration = path.join(directory, "private review $(literal);config.json");
   const trace = path.join(directory, "commands.jsonl");
+  const environmentFile = path.join(directory, "pipeline.env");
   mkdirSync(bin, { mode: 0o700 });
   writeFileSync(configuration, JSON.stringify(settings), { mode: 0o600 });
+  writeFileSync(environmentFile, "", { mode: 0o600 });
   writeFileSync(path.join(bin, "npm"), `#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
@@ -56,7 +59,8 @@ const credentialMatches = {
   canvasPassword: process.env.CANVAS_PASSWORD === expected.CANVAS_PASSWORD
 };
 const headed = { skyward: process.env.SKYWARD_HEADED === "1", canvas: process.env.CANVAS_HEADED === "1" };
-fs.appendFileSync(process.env.PIPELINE_TEST_TRACE, JSON.stringify({ args, cwd: process.cwd(), credentials, credentialMatches, headed }) + "\\n", { mode: 0o600 });
+const azureCredential = process.env.AZURE_FOUNDRY_API_KEY !== undefined;
+fs.appendFileSync(process.env.PIPELINE_TEST_TRACE, JSON.stringify({ args, cwd: process.cwd(), credentials, credentialMatches, headed, azureCredential }) + "\\n", { mode: 0o600 });
 const key = args[1] === "cli" ? "Review:" + args[4] : args[1];
 const failures = JSON.parse(process.env.PIPELINE_TEST_FAILURES || "{}");
 console.log("Synthetic command output");
@@ -72,11 +76,13 @@ process.exit(failures[key] || 0);
   });
   const calls = () => existsSync(trace) ? readFileSync(trace, "utf8").trim().split("\n")
     .map(line => callSchema.parse(JSON.parse(line))) : [];
+  const environmentArgs = (args: string[]) => args.some(arg => arg === "--env-file" || arg.startsWith("--env-file="))
+    ? [] : ["--env-file", environmentFile];
   return {
-    directory, configuration, trace,
+    directory, configuration, trace, environmentFile,
     run(args: string[], failures: Record<string, number> = {}, environment: NodeJS.ProcessEnv = {}) {
       if (existsSync(trace)) rmSync(trace);
-      const result = spawnSync("python3", [terminalDriver, "--no-terminal", script, "--config", configuration, ...args], {
+      const result = spawnSync("python3", [terminalDriver, "--no-terminal", script, "--config", configuration, ...environmentArgs(args), ...args], {
         cwd: directory,
         env: environmentFor(failures, environment),
         encoding: "utf8", timeout: 20000,
@@ -88,7 +94,7 @@ process.exit(failures[key] || 0);
       if (existsSync(trace)) rmSync(trace);
       const result = spawnSync("python3", [terminalDriver], {
         cwd: directory, env: environmentFor({}, { ...noCredentials, ...environment }),
-        input: JSON.stringify({ argv: ["bash", ...bashOptions, script, "--config", configuration, ...args], responses, stdoutFile }),
+        input: JSON.stringify({ argv: ["bash", ...bashOptions, script, "--config", configuration, ...environmentArgs(args), ...args], responses, stdoutFile }),
         encoding: "utf8", timeout: 25000,
       });
       assert.equal(result.error, undefined);
@@ -101,6 +107,125 @@ process.exit(failures[key] || 0);
     close() { rmSync(directory, { recursive: true, force: true }); },
   };
 }
+
+test("dotenv credentials reach unattended logins without shell execution, newline loss, tracing or Azure-key leakage", execution, () => {
+  const fixture = harness();
+  const marker = path.join(fixture.directory, "must-not-exist");
+  const credentials = {
+    SKYWARD_USERNAME: "PRIVATE_FILE_SKYWARD_USER",
+    SKYWARD_PASSWORD: `  PRIVATE_FILE_SKYWARD_PASSWORD $(touch "${marker}") \`literal\` # "\\path"\nlast\n`,
+    CANVAS_USERNAME: "PRIVATE_FILE_CANVAS_USER",
+    CANVAS_PASSWORD: "PRIVATE_FILE_CANVAS_PASSWORD $HOME",
+  };
+  try {
+    writeFileSync(fixture.environmentFile, Object.entries(credentials).map(([name, value]) => `${name}='${value}'`).join("\n") +
+      "\nAZURE_FOUNDRY_API_KEY=PRIVATE_FILE_AZURE_KEY\n");
+    const result = fixture.terminal([], [], {
+      PIPELINE_TEST_EXPECTED_CREDENTIALS: JSON.stringify(credentials),
+      AZURE_FOUNDRY_API_KEY: undefined,
+    }, ["-x"]);
+    assert.equal(result.status, 0, result.output);
+    assert.equal(result.calls.length, 8);
+    assert.equal(result.calls[0].credentialMatches.skywardUsername, true);
+    assert.equal(result.calls[0].credentialMatches.skywardPassword, true);
+    assert.equal(result.calls[1].credentialMatches.canvasUsername, true);
+    assert.equal(result.calls[1].credentialMatches.canvasPassword, true);
+    assert(result.calls.every(call => !call.azureCredential));
+    assert(result.calls.slice(2).every(call => Object.values(call.credentials).every(value => !value)));
+    assert.equal(existsSync(marker), false);
+    assert.doesNotMatch(result.output + readFileSync(fixture.trace, "utf8"), /PRIVATE_FILE_/);
+    assert.match(result.output, /Loaded private environment settings/);
+  } finally { fixture.close(); }
+});
+
+test("explicitly exported credentials override file values independently for each variable", execution, () => {
+  const fixture = harness();
+  const expected = {
+    SKYWARD_USERNAME: "PRIVATE_EXPORTED_USER", SKYWARD_PASSWORD: "PRIVATE_EXPORTED_PASSWORD",
+    CANVAS_USERNAME: "PRIVATE_FILE_USER", CANVAS_PASSWORD: "PRIVATE_FILE_PASSWORD",
+  };
+  try {
+    writeFileSync(fixture.environmentFile,
+      "SKYWARD_USERNAME=PRIVATE_IGNORED_USER\nSKYWARD_PASSWORD=PRIVATE_IGNORED_PASSWORD\n" +
+      "CANVAS_USERNAME=PRIVATE_FILE_USER\nCANVAS_PASSWORD=PRIVATE_FILE_PASSWORD\n");
+    const result = fixture.run(["--phase", "login"], {}, {
+      ...noCredentials, SKYWARD_USERNAME: expected.SKYWARD_USERNAME, SKYWARD_PASSWORD: expected.SKYWARD_PASSWORD,
+      PIPELINE_TEST_EXPECTED_CREDENTIALS: JSON.stringify(expected),
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.calls[0].credentialMatches.skywardUsername, true);
+    assert.equal(result.calls[0].credentialMatches.skywardPassword, true);
+    assert.equal(result.calls[1].credentialMatches.canvasUsername, true);
+    assert.equal(result.calls[1].credentialMatches.canvasPassword, true);
+    assert.doesNotMatch(result.stdout + result.stderr + readFileSync(fixture.trace, "utf8"), /PRIVATE_/);
+  } finally { fixture.close(); }
+});
+
+test("environment-loader failures stop all commands while help and dry-run never read dotenv", execution, () => {
+  const fixture = harness();
+  try {
+    chmodSync(fixture.environmentFile, 0o644);
+    const unsafe = fixture.run(["--phase", "login"]);
+    assert.equal(unsafe.status, 1);
+    assert.match(unsafe.stderr, /Environment loading failed/);
+    assert.deepEqual(unsafe.calls, []);
+    chmodSync(fixture.environmentFile, 0o600);
+    writeFileSync(fixture.environmentFile, "SKYWARD_PASSWORD=PRIVATE\nNODE_OPTIONS=PRIVATE_STARTUP_OPTIONS\n");
+    const invalid = fixture.run(["--phase", "login"]);
+    assert.equal(invalid.status, 1);
+    assert.deepEqual(invalid.calls, []);
+    assert.doesNotMatch(invalid.stdout + invalid.stderr, /PRIVATE_STARTUP_OPTIONS|SKYWARD_PASSWORD=PRIVATE/);
+    assert.equal(fixture.run(["--phase", "login", "--dry-run"]).status, 0);
+    rmSync(fixture.environmentFile);
+    const missing = fixture.run(["--phase", "login"]);
+    assert.equal(missing.status, 1);
+    assert.deepEqual(missing.calls, []);
+    assert.equal(fixture.run(["--help"]).status, 0);
+    const preview = fixture.run(["--phase", "login", "--dry-run"]);
+    assert.equal(preview.status, 0);
+    assert.deepEqual(preview.calls, []);
+  } finally { fixture.close(); }
+});
+
+test("the default dotenv path is repository-root-relative and an absent default preserves exported-credential workflows", execution, () => {
+  const fixture = harness();
+  const credentials = {
+    SKYWARD_USERNAME: "PRIVATE_DEFAULT_SKYWARD_USER", SKYWARD_PASSWORD: "PRIVATE_DEFAULT_SKYWARD_PASSWORD",
+    CANVAS_USERNAME: "PRIVATE_DEFAULT_CANVAS_USER", CANVAS_PASSWORD: "PRIVATE_DEFAULT_CANVAS_PASSWORD",
+  };
+  try {
+    const scripts = path.join(fixture.directory, "scripts");
+    mkdirSync(scripts, { mode: 0o700 });
+    const isolatedScript = path.join(scripts, "run-pipeline.sh");
+    copyFileSync(script, isolatedScript);
+    symlinkSync(path.join(root, "scripts/pipeline-env.ts"), path.join(scripts, "pipeline-env.ts"));
+    symlinkSync(path.join(root, "node_modules"), path.join(fixture.directory, "node_modules"), "dir");
+    symlinkSync(path.join(root, "apps"), path.join(fixture.directory, "apps"), "dir");
+    const environmentFile = path.join(fixture.directory, ".env");
+    writeFileSync(environmentFile, Object.entries(credentials).map(([name, value]) => `${name}=${value}`).join("\n"), { mode: 0o600 });
+    const run = (environment: NodeJS.ProcessEnv) => spawnSync("python3",
+      [terminalDriver, "--no-terminal", isolatedScript, "--config", fixture.configuration, "--phase", "login"], {
+        cwd: tmpdir(),
+        env: { ...process.env, ...noCredentials, SKYWARD_HEADED: undefined, CANVAS_HEADED: undefined,
+          ...environment, PATH: `${path.join(fixture.directory, "bin")}:${process.env.PATH ?? ""}`,
+          PIPELINE_TEST_TRACE: fixture.trace, PIPELINE_TEST_FAILURES: "{}",
+          PIPELINE_TEST_EXPECTED_CREDENTIALS: JSON.stringify(credentials) },
+        encoding: "utf8", timeout: 20000,
+      });
+    const fromFile = run({});
+    assert.equal(fromFile.status, 0, fromFile.stderr);
+    const calls = readFileSync(fixture.trace, "utf8").trim().split("\n").map(line => callSchema.parse(JSON.parse(line)));
+    assert.equal(calls[0].credentialMatches.skywardPassword, true);
+    assert.equal(calls[1].credentialMatches.canvasPassword, true);
+    assert(calls.every(call => call.cwd === fixture.directory));
+    rmSync(environmentFile);
+    rmSync(fixture.trace);
+    const exported = run(credentials);
+    assert.equal(exported.status, 0, exported.stderr);
+    assert.match(exported.stderr, /Optional .env file not found/);
+    assert.doesNotMatch(fromFile.stdout + fromFile.stderr + exported.stdout + exported.stderr, /PRIVATE_DEFAULT/);
+  } finally { fixture.close(); }
+});
 
 test("pipeline help and argument validation need no configuration, database or portal access", () => {
   const fixture = harness();
@@ -119,6 +244,7 @@ test("pipeline help and argument validation need no configuration, database or p
       ["--report-type", "unknown"], ["--phase", "collection", "--report-type", "student-snapshot"],
       ["--assignment-days", "60"], ["--report-type", "student-snapshot", "--assignment-days", "0"],
       ["--report-type", "student-snapshot", "--message-days", "367"],
+      ["--env-file"], ["--env-file="], ["--env-file", "a", "--env-file", "b"],
     ]) {
       const result = fixture.run(args);
       assert.equal(result.status, 1, args.join(" "));
@@ -221,6 +347,7 @@ test("login credentials reach only the relevant login command and never appear i
     const result = fixture.run(["--login"], {}, {
       SKYWARD_USERNAME: "PRIVATE_SKYWARD_USER", SKYWARD_PASSWORD: "PRIVATE_SKYWARD_PASSWORD",
       CANVAS_USERNAME: "PRIVATE_CANVAS_USER", CANVAS_PASSWORD: "PRIVATE_CANVAS_PASSWORD",
+      AZURE_FOUNDRY_API_KEY: "PRIVATE_AZURE_KEY",
       SKYWARD_HEADED: "1", CANVAS_HEADED: "1",
     });
     assert.equal(result.status, 0, result.stderr);
@@ -229,7 +356,8 @@ test("login credentials reach only the relevant login command and never appear i
     assert.equal(result.calls[0].headed.skyward, true);
     assert.equal(result.calls[1].headed.canvas, true);
     assert(result.calls.slice(2).every(call => Object.values(call.credentials).every(present => !present)));
-    assert.doesNotMatch(result.stdout + result.stderr + readFileSync(fixture.trace, "utf8"), /PRIVATE_SKYWARD|PRIVATE_CANVAS/);
+    assert(result.calls.every(call => !call.azureCredential));
+    assert.doesNotMatch(result.stdout + result.stderr + readFileSync(fixture.trace, "utf8"), /PRIVATE_SKYWARD|PRIVATE_CANVAS|PRIVATE_AZURE/);
     const noLogin = fixture.run(["--phase", "reporting"], {}, { SKYWARD_PASSWORD: "PRIVATE_UNUSED_PASSWORD", CANVAS_PASSWORD: "PRIVATE_UNUSED_PASSWORD" });
     assert.equal(noLogin.status, 0);
     assert(noLogin.calls.every(call => Object.values(call.credentials).every(present => !present)));
@@ -473,7 +601,8 @@ test("configuration controls the platform/section scope and relative paths resol
   }));
   try {
     const relative = path.relative(root, fixture.configuration);
-    const result = spawnSync("python3", [terminalDriver, "--no-terminal", script, "--config", relative, "--phase", "collection"], {
+    const result = spawnSync("python3", [terminalDriver, "--no-terminal", script, "--config", relative,
+      "--env-file", path.relative(root, fixture.environmentFile), "--phase", "collection"], {
       cwd: fixture.directory,
       env: { ...process.env, ...noCredentials, CANVAS_USERNAME: "synthetic-canvas-user", CANVAS_PASSWORD: "synthetic-canvas-password",
         CANVAS_HEADED: undefined, PIPELINE_TEST_FAILURES: "{}",

@@ -3,5 +3,5 @@
   "version": "0.0.0",
   "private": true,
   "scripts": { "cli": "tsx src/index.ts", "data": "tsx src/storage.ts", "test": "tsx --test tests/*.test.ts" },
-  "dependencies": { "@schoolhawk/storage": "0.0.0", "@schoolhawk/core": "0.0.0", "@schoolhawk/briefing": "0.0.0" }
+  "dependencies": { "@schoolhawk/storage": "0.0.0", "@schoolhawk/core": "0.0.0", "@schoolhawk/briefing": "0.0.0", "@schoolhawk/agent": "0.0.0" }
 }

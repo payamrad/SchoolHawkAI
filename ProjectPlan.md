@@ -4,6 +4,10 @@ Updated: 2026-10-25
 
 Status: Local collection, storage, deterministic review, bounded briefings, and full current-student snapshots are implemented. Live portal compatibility, downstream summarization/delivery, and unattended-deployment acceptance gates remain to be verified.
 
+An opt-in Azure Foundry agent interface now supports connection tests and full
+student-report submission. AI-output grounding, persistence, delivery, and the
+remaining Phase 6 acceptance gates are not yet complete.
+
 ## 1. Purpose and Product Boundary
 
 SchoolHawkAI is a private family school-monitoring system hosted on a Raspberry Pi. It collects information from authorized school and childcare accounts, detects meaningful changes, and produces evidence-backed briefings for Nicole, Zach, and Evander.
@@ -90,7 +94,7 @@ Use the Playwright-managed Chromium build if supported on the chosen image. A sy
 | Language and validation | TypeScript strict mode and Zod |
 | Persistence | SQLite with migrations and transactions |
 | Logging | Pino with allowlisted fields and redaction |
-| Agent integration | Official OpenClaw project, version and capabilities verified before integration |
+| Agent integration | Azure AI Foundry through a provider-neutral interface; OpenClaw remains optional |
 | Scheduling | systemd timers as the initial single scheduling authority |
 | Dependency management | npm workspaces with a root lockfile once the monorepo foundation is established |
 
@@ -167,6 +171,14 @@ Use deterministic action allowlists and exact destination allowlists, including 
 - Use `/var/lib/schoolagent` for service data and a protected system credential mechanism or `/etc/schoolagent` configuration for secrets. A root-only environment file can be loaded by systemd; the application must not depend on reading it directly.
 - On session expiry, stop that account's collection, retain last-known data, and request manual renewal. Do not retry authentication aggressively.
 - Protect local interactive authentication separately from headless service operation; choose a secure desktop or local display workflow during the Pi spike.
+
+The pipeline imports a private repository-root `.env` before actual execution,
+or a selected `--env-file`, using dotenv parsing rather than shell evaluation.
+Existing exported settings win. Help/dry-run do not read credentials; unsafe or
+unsupported environment files stop execution before login. Only the matching
+portal credentials reach each login subprocess, and Azure credentials are excluded
+from the current collection/local-reporting commands. Scheduled-service secret
+storage, run locking, and daily scheduling remain separate deployment work.
 
 Before generating sensitive artifacts, ignore `.env` files except sanitized examples, `.auth` directories, local data, snapshots, screenshots, traces, downloads, database files including WAL/SHM files, and browser profiles. Ignore rules do not remove files already tracked by Git; verify tracked files as well.
 
@@ -344,9 +356,10 @@ bytes, with explicit omission counts and no unqualified all-clear on incomplete
 or truncated input. It also supports deterministic local text output.
 
 This implements the local change/priority and structured-input stages only.
-Attendance/calendar/form collection, semantic urgency from teacher text, hosted
-model calls, report validation/storage, scheduling, and email/SMS delivery remain
-outside this slice. Immediate-delivery eligibility is opt-in and sends nothing.
+Attendance/calendar/form collection, semantic urgency from teacher text,
+report grounding/storage, scheduling, and email/SMS delivery remain outside this
+slice. The separate opt-in Foundry client can submit full student snapshots.
+Immediate-delivery eligibility is opt-in and sends nothing.
 Review audit history has no automatic retention/deletion job yet.
 
 See [README.md](README.md#deterministic-review-and-briefing-input) for commands,
@@ -446,6 +459,15 @@ Exit gate: stale and incomplete scopes are clear; routine items do not trigger u
 
 Implement a direct Azure AI Foundry adapter or the optional narrow OpenClaw skill against the provider-neutral input contract. Add a source-grounded report schema, output validation/storage, injection tests, and model-outage fallback. Approve the external provider and delivery channel before sending real records.
 
+Implemented transport slice: `StudentReportAgent.testConnection()` and
+`analyzeStudentReport(report)`, the Azure Foundry Responses adapter, and explicit
+`Agent test` / `Agent analyze` CLI commands. The adapter preserves the configured
+agent system prompt, sends complete validated snapshots as untrusted user data,
+and makes stateless requests without client tools. Credentials and model content
+are excluded from diagnostics; timeouts, HTTP failures, refusals, and oversized
+or incomplete replies fail explicitly. This is not yet source-grounded validation
+of AI conclusions, automatic report storage, context-aware partitioning, or delivery.
+
 Exit gate: agent cannot obtain secrets, browse arbitrarily, run arbitrary commands, or mutate portal data; actionable claims reference known evidence; model failures do not break collection or deterministic alerts.
 
 ### Phase 7: Deployment and Operations
@@ -509,7 +531,7 @@ The schedule is indicative, not a substitute for acceptance gates. Portal authen
 | Week 2 | Monorepo, security controls, schemas, storage foundation, fixture infrastructure |
 | Weeks 3-4 | First adapter, source evidence, persistent history, backup validation |
 | Week 5 | Change detection, identity edge cases, priorities, deterministic briefing |
-| Week 6 | Restricted OpenClaw, approved delivery, injection and outage testing |
+| Week 6 | Azure Foundry agent integration, approved delivery, injection and outage testing |
 | Week 7 | systemd deployment, monitoring, recovery procedures |
 | Week 8 onward | At least two weeks of observation; second portal only after stability |
 
@@ -533,7 +555,7 @@ Ordered starting backlog:
 16. `CHANGE-003`: Enforce incomplete-run safety, first-run semantics, and removal confirmation.
 17. `RULES-001`: Implement deterministic priorities and template-based briefings.
 18. `NOTIFY-001`: Implement approved delivery, outbox retries, deduplication, and rate limits.
-19. `AGENT-001`: Build and verify the restricted OpenClaw school-review skill.
+19. `AGENT-001`: Build and verify the provider-neutral agent interface and Azure Foundry adapter.
 20. `AGENT-002`: Add minimized evidence-backed summaries, output validation, and fallback.
 21. `OPS-001`: Deploy hardened services, single scheduler, and shared run lock.
 22. `OPS-002`: Verify health alerts, retention, authentication renewal, and encrypted restore.

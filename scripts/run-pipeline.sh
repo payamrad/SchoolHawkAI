@@ -13,6 +13,8 @@ Usage: bash scripts/run-pipeline.sh [options]
   --login            Also log in for local-only phases; collection already requires login.
   --config <path>     Private review JSON (default: config/review.local.json).
                      Relative paths are resolved from the repository root.
+  --env-file <path>   Private dotenv settings (default: repository-root .env if present).
+                     Existing exported variables win. An explicitly selected file is required.
   --days <N>          Override both Skyward collection lookbacks, 1-366 (default: 7;
                      student-snapshot uses its assignment/message windows instead).
                      Upcoming/missing work, grades, and Canvas retain their full scope.
@@ -31,11 +33,13 @@ supported. Login/collection runs sequentially with one account per portal.
 Every collection run requires a successful fresh login for that portal. Existing
 session files do not bypass login. Local-only review/reporting does not log in
 unless --login or the login phase is explicitly selected.
-Login reuses exported credentials or prompts for missing usernames/passwords on
+Non-dry runs load private .env settings before login, without executing shell code.
+Only supported application variables are loaded; help/dry-run never read the file.
+Login reuses exported or file-loaded credentials, or prompts for missing values on
 your terminal. Password input is hidden. The runner exports the matching variables
 only for that login process; nothing is saved to a credential file.
 Without a terminal, provide SKYWARD_USERNAME/SKYWARD_PASSWORD and/or
-CANVAS_USERNAME/CANVAS_PASSWORD through the environment. No credentials are read
+CANVAS_USERNAME/CANVAS_PASSWORD through .env or the environment. No credentials are read
 from piped stdin, command arguments, or review configuration.
 Canvas also supports CANVAS_HEADED=1 with both credential variables unset for manual
 browser login. SKYWARD_HEADED=1 opens a visible browser but still requires credentials.
@@ -68,6 +72,7 @@ fail() {
 
 phase_list=all
 config=config/review.local.json
+env_file=.env
 days=7
 messages=unread
 format=text
@@ -82,13 +87,13 @@ while (( $# )); do
     --help|-h) usage; exit 0 ;;
     --dry-run) dry_run=true; shift; continue ;;
     --login) login=true; shift; continue ;;
-    --phase|--config|--days|--messages|--format|--report-type|--assignment-days|--message-days)
+    --phase|--config|--env-file|--days|--messages|--format|--report-type|--assignment-days|--message-days)
       (( $# >= 2 )) || fail "Missing option value. Use --help."
       option=$1
       value=$2
       shift 2
       ;;
-    --phase=*|--config=*|--days=*|--messages=*|--format=*|--report-type=*|--assignment-days=*|--message-days=*)
+    --phase=*|--config=*|--env-file=*|--days=*|--messages=*|--format=*|--report-type=*|--assignment-days=*|--message-days=*)
       option=${1%%=*}
       value=${1#*=}
       shift
@@ -101,6 +106,7 @@ while (( $# )); do
   case "$option" in
     --phase) phase_list=$value ;;
     --config) config=$value ;;
+    --env-file) env_file=$value ;;
     --days) days=$value ;;
     --messages) messages=$value ;;
     --format) format=$value ;;
@@ -166,6 +172,7 @@ if [[ "$collection" == true ]]; then login=true; fi
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd -- "$root"
 [[ "$config" == /* ]] || config="$root/$config"
+[[ "$env_file" == /* ]] || env_file="$root/$env_file"
 command -v node >/dev/null || fail "Node.js is required. Install the project's supported runtime and dependencies first."
 if [[ "$dry_run" == false ]]; then
   (( EUID != 0 )) || fail "Run as the app user, not root or sudo."
@@ -175,7 +182,7 @@ fi
 portal_access=$collection
 [[ "$login" != true ]] || portal_access=true
 if ! plan=$(
-unset SKYWARD_USERNAME SKYWARD_PASSWORD CANVAS_USERNAME CANVAS_PASSWORD
+unset SKYWARD_USERNAME SKYWARD_PASSWORD CANVAS_USERNAME CANVAS_PASSWORD AZURE_FOUNDRY_API_KEY
 node --import tsx - "$config" "$portal_access" <<'NODE'
 let ReviewUsageError;
 try {
@@ -217,6 +224,28 @@ collection_failed=false
 review_failed=false
 declare -A login_seen=()
 declare -A login_failed=()
+
+load_environment() {
+  local descriptor loader name value status=0 broken=false tracing=false mode=optional
+  [[ -z "${provided[--env-file]:-}" ]] || mode=required
+  if [[ $- == *x* ]]; then tracing=true; set +x; fi
+  if ! exec {descriptor}< <(node --import tsx "$root/scripts/pipeline-env.ts" "$env_file" "$mode"); then
+    return 1
+  fi
+  loader=$!
+  while IFS= read -r -d '' name <&"$descriptor"; do
+    if ! IFS= read -r -d '' value <&"$descriptor" || ! export "$name=$value"; then
+      broken=true
+      break
+    fi
+  done
+  exec {descriptor}<&-
+  if wait "$loader"; then :; else status=$?; fi
+  unset name value
+  if [[ "$tracing" == true ]]; then set -x; fi
+  if [[ "$broken" == true ]]; then return 1; fi
+  return "$status"
+}
 
 prepare_login_credentials() {
   local portal=$1 display prefix username password
@@ -279,6 +308,7 @@ run_command() {
   if (
     # Never trace credential expansion, including when invoked with bash -x.
     set +x
+    unset AZURE_FOUNDRY_API_KEY
     case "$label" in
       login/skyward)
         unset CANVAS_USERNAME CANVAS_PASSWORD
@@ -301,6 +331,12 @@ run_command() {
     return 1
   fi
 }
+
+if [[ "$dry_run" == false ]]; then
+  if ! load_environment; then
+    fail "Environment loading failed. No login, collection, or review commands were executed."
+  fi
+fi
 
 if [[ "$login" == true ]]; then
   printf 'PIPELINE: One login attempt per configured portal. Credentials stay in the relevant login process environment.\n' >&2

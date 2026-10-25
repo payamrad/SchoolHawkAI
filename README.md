@@ -1,6 +1,6 @@
 # SchoolHawkAI
 
-Read-only family school collection and local storage. See [ProjectPlan.md](ProjectPlan.md)
+Read-only family school collection, local storage, and opt-in agent analysis. See [ProjectPlan.md](ProjectPlan.md)
 for the architecture and staged delivery plan.
 
 ## Workspace Layout
@@ -9,6 +9,7 @@ for the architecture and staged delivery plan.
 - `apps/cli`: local inspection, Canvas matching, `Review`, and narrowly scoped cleanup commands.
 - `packages/core`: Zod contracts, deterministic review/change detection, priorities, and source matching.
 - `packages/briefing`: bounded briefing input, full student snapshots, and deterministic text rendering.
+- `packages/agent`: provider-neutral agent interface and the Azure Foundry Responses adapter.
 - `packages/storage`: persistence interfaces, SQLite implementation, migrations,
   encryption helpers, and Vitest tests.
 - `config`: public portal URLs.
@@ -116,6 +117,7 @@ Options:
 | `--phase` | `all` | `login`, `collection`, `change-detection` (or `review`), `reporting`, or a comma-separated combination; every collection run logs in first |
 | `--login` | Automatic for collection | Explicitly prepend login to local-only phases; accepted but redundant for `all`/`collection` |
 | `--config` | `config/review.local.json` | Existing private review configuration; relative paths are repository-root-relative |
+| `--env-file` | Repository-root `.env`, if present | Private dotenv settings; existing exported variables win, and an explicitly selected file must exist |
 | `--days` | `7` for briefing runs | Override both Skyward collection windows; snapshot runs otherwise use their separate assignment/message windows |
 | `--messages` | `unread` | Preserve the collector default, or use `all` to include read messages within the window |
 | `--format` | `text` | JSON or deterministic text output for the selected report type |
@@ -150,21 +152,42 @@ interactive use:**
 npm run pipeline -- --phase all
 ```
 
-The runner reuses any exported credentials and prompts on your terminal for missing
-usernames/passwords. Password input is hidden, including when Bash tracing is enabled.
+For actual runs, the runner automatically loads the repository-root `.env` after
+configuration preflight and before login. No separate Node command or shell
+`source` is needed. Existing exported variables take precedence, including
+explicitly empty values. A missing default `.env` is reported and leaves the
+existing environment/interactive behavior intact. An explicitly selected
+`--env-file` must exist. Relative file paths are repository-root-relative.
+
+The file must be a private regular file owned by the app user (`0600`), not a
+symlink, and at most 100 KB. Parsing uses Node's dotenv syntax, not shell
+evaluation or variable expansion. Quoted spaces, multiline values, and literal
+`$`/command-substitution text are preserved without execution or tracing.
+Only `SKYWARD_`/`CANVAS_` username, password, headed, and success-selector settings,
+plus the five Azure Foundry settings in `.env.example`, are accepted. Unknown
+variables, including shell/runtime startup settings such as `BASH_ENV`,
+`NODE_OPTIONS`, and `PATH`, are rejected before any pipeline command runs.
+Help and dry-run never open the environment file.
+
+The runner uses exported or file-loaded credentials and prompts on your terminal
+for anything still missing. Password input is hidden, including when Bash tracing is enabled.
 Prompts use the controlling terminal, not piped stdin or the internal collection
 plan, so they also work when command output is redirected. Empty input or EOF skips
 that portal without making a login attempt; Ctrl-C stops the pipeline.
 
-The runner exports `SKYWARD_USERNAME`/`SKYWARD_PASSWORD` or
-`CANVAS_USERNAME`/`CANVAS_PASSWORD` only inside the matching login subprocess.
+Each login subprocess receives only its matching
+`SKYWARD_USERNAME`/`SKYWARD_PASSWORD` or `CANVAS_USERNAME`/`CANVAS_PASSWORD`.
+File-loaded settings stay in the pipeline process until it exits; the caller's
+shell is not modified. The Azure API key is excluded from every current pipeline
+child command, since the pipeline still performs no AI calls.
 Prompted credentials disappear when that process exits and are never saved to
 files, added to command arguments, or exported into your parent shell. Other portal
 credentials are excluded, as are all credentials from configuration preflight,
 collection, and local review/reporting.
 
-For unattended use, supply the credential variables through a protected environment
-as described in the [collector login instructions](apps/collector/README.md#skyward-login).
+For unattended use, fill in the four portal credential variables in private `.env`,
+select a private file with `--env-file`, or have the scheduler provide them through
+the environment. See the [collector login instructions](apps/collector/README.md#skyward-login).
 Missing credentials without an interactive terminal fail explicitly rather than
 hanging or reading piped input. Help, dry-runs, and runs without a login phase never
 prompt. If you exported credentials yourself, unset them in your terminal afterward;
@@ -446,8 +469,9 @@ Source links and identity mapping stay local and can be inspected with `Review s
 selected source text may still contain personal information. All source text remains
 untrusted data, never system instructions or authorization to use tools. Approve the
 provider, fields, retention policy, and delivery channel before transmitting anything.
-An eventual Azure AI Foundry or OpenClaw adapter can consume the same contract.
-Validating/saving model reports and email/SMS delivery are deliberately not implemented.
+The Azure Foundry agent adapter below consumes the full student snapshot; this
+bounded contract remains available for other summarization consumers.
+Fact-checking/saving model reports and email/SMS delivery are not implemented.
 `renderDeterministicBriefing` / `--text` provides a local model-free fallback.
 
 ## Full Current-Student Snapshot
@@ -542,9 +566,10 @@ The small briefing's 40-item / 32 KiB limits do not apply to full snapshots.
 Snapshots never silently shorten selected descriptions/messages or drop
 lower-priority qualifying records. Safety limits fail explicitly: 50 MiB of output, 100,000 distinct source
 records, 500,000 retained value versions, and the existing review/source-run
-processing limits (source history is read before reporting-window selection). An eventual AI adapter must handle its own context budget,
-for example by processing student/course groups with the shared context; it must
-not silently discard records.
+processing limits (source history is read before reporting-window selection). The
+agent adapter also enforces an HTTP request-byte limit, but that is not a model
+token budget. Oversized requests and provider context-limit errors fail explicitly.
+Context-aware partitioning remains future work; records are never silently discarded.
 
 The snapshot includes private educational text, sender/teacher details, and full
 message content. Portal/student identity keys are represented by opaque references
@@ -570,6 +595,99 @@ SQLite transaction. It preserves source records and mappings; the source data an
 review history retain their existing encryption. The full snapshot is returned to
 the caller/stdout, not automatically written to a plaintext file or sent anywhere.
 Persisting validated AI-written reports and email/SMS delivery remain later stages.
+
+## Azure Foundry Agent Integration
+
+`@schoolhawk/agent` exposes the provider-neutral `StudentReportAgent` interface:
+
+- `testConnection()` sends synthetic text and requires a completed, nonempty agent
+  reply. It does not load school data or require a school database/key. The agent
+  need not echo a special marker; its existing system prompt remains in control.
+- `analyzeStudentReport(report)` accepts a schema-valid full student snapshot,
+  transmits every included field, and returns the agent's text with the input
+  snapshot/review IDs and student references.
+
+The `AzureFoundryAgent` implementation targets the existing
+`StudentGradesConsultant` Responses endpoint. It uses the `api-key` header and
+`api-version=2025-11-15-preview`, not Chat Completions or a direct model deployment.
+It does not replace the agent's configured system prompt, select a different model,
+or recalculate deterministic priorities.
+
+### Configure and test
+
+Provide credentials through the process environment. For local use, create a
+private environment file **only if it does not already exist**, then edit its
+blank API-key value locally:
+
+```bash
+install -m 600 .env.example .env
+node --env-file=.env --import tsx apps/cli/src/index.ts Agent test
+```
+
+`.env` is ignored by Git. Do not put credentials in command-line arguments,
+review configuration, report JSON, or source code. The direct CLI does not automatically
+load environment files; Node's `--env-file` above applies only to that process.
+The Bash pipeline loads `.env` itself for its own steps, but still does not invoke
+the agent. With
+credentials already supplied by a secret manager or environment, use:
+
+```bash
+npm run cli -- Agent test
+npm run cli -- Agent --help
+```
+
+Required variables are `AZURE_FOUNDRY_AGENT_ENDPOINT` and `AZURE_FOUNDRY_API_KEY`.
+Optional variables are `AZURE_FOUNDRY_API_VERSION`, `AZURE_FOUNDRY_TIMEOUT_MS`
+(default 120,000; maximum 300,000), and `AZURE_FOUNDRY_MAX_REQUEST_BYTES`
+(default 50 MiB; minimum 1 KiB). Only HTTPS Foundry agent Responses endpoints are
+accepted; redirects and URL-embedded credentials are rejected. Some newer Azure
+Agent Application endpoints require Microsoft Entra authentication instead of
+API keys; this connector reports that failure rather than switching endpoints.
+
+### Submit a student report
+
+**These commands explicitly send private educational data to Azure.** Approve the
+provider, fields, and retention terms before using real records. Regular `Review`
+commands and the existing pipeline remain local; they do not call the agent.
+
+```bash
+# Generate the current name-matched snapshot, close storage, then send it.
+node --env-file=.env --import tsx apps/cli/src/index.ts Agent analyze --config config/review.local.json
+
+# Or send an existing private, schema-valid student snapshot.
+node --env-file=.env --import tsx apps/cli/src/index.ts Agent analyze --report /private/path/student-snapshot.json
+```
+
+Existing report files must be private regular files (`0600`), not symlinks.
+`--config` uses the normal 60-day assignment and 14-day message windows; use
+`Review snapshot` to prepare different windows before choosing `--report`.
+CLI responses are JSON and may contain private AI-generated text.
+
+Programmatic callers can create `AzureFoundryAgent` from
+`@schoolhawk/agent/azure-foundry`, supplying `endpoint` and `apiKey`, or call
+`createAzureFoundryAgentFromEnv()`. Both implement the same interface.
+
+Each call uses a fresh, non-streaming Responses request with `store: false`, no
+conversation/previous-response ID, and no client tools. Report JSON is user-input
+data, never a replacement system prompt. `store: false` requests no stored
+Responses history; it does not replace Azure's wider data-retention agreement.
+The adapter accepts completed text replies, bounds response bodies to 1 MiB, and
+rejects refusals, unfinished replies, malformed responses, and unsupported tool
+operations. It never follows source URLs or executes commands requested by a model.
+
+Timeouts, HTTP errors, invalid reports, and size failures are explicit and
+sanitized. There are no automatic retries, since a timeout can leave the remote
+outcome uncertain. Private diagnostics contain operation status, duration, HTTP
+status, and structural counts, not keys, endpoints, prompts, reports, or AI text.
+
+Returned analysis is labeled `unverified-ai-analysis`: transport/schema checks do
+not fact-check the model's academic conclusions or validate its citations. Parents
+must verify recommendations against source evidence and collection limitations.
+The returned `sourceStatus` and `sourceNotices` preserve deterministic input
+coverage warnings independently of anything the model says.
+No AI analysis is automatically persisted, delivered, or used to change school
+records or deterministic priorities. On an agent outage, the independent local
+`Review briefing --text` remains available.
 
 ## Canvas Login
 

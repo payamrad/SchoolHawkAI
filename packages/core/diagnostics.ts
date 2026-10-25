@@ -7,6 +7,7 @@ export const diagnosticStageSchema = z.enum([
   "BROWSER_LAUNCH", "SESSION_RESUME", "COLLECT", "DATABASE_WRITE", "BROWSER_CLOSE",
   "AUTH_DIRECTORY", "LOGIN_NAVIGATION", "LOGIN_FORM", "LOGIN_VERIFY", "SESSION_SAVE",
   "DATE_WINDOW", "INBOX_NAVIGATION", "CLI_COMMAND", "IMPORT", "BACKUP", "STATUS", "CLEANUP", "REVIEW_PROCESS", "BRIEFING_INPUT", "STUDENT_SNAPSHOT",
+  "AGENT_REQUEST", "AGENT_RESPONSE",
 ]);
 
 export const diagnosticEventSchema = z.object({
@@ -24,6 +25,7 @@ export const diagnosticEventSchema = z.object({
     "SCROLL_COMPLETENESS_UNVERIFIED", "SCHEMA_INVALID", "REQUEST_FAILED", "PERMISSION_DENIED",
     "RATE_LIMITED", "HTTP_ERROR", "RESPONSE_INVALID", "IMPORT_REJECTED", "IMPORT_SUMMARY",
     "STORAGE_KEY_INVALID", "STORAGE_SCHEMA_UNSUPPORTED", "STORAGE_OPEN_FAILED", "REVIEW_SUMMARY", "BRIEFING_SUMMARY", "SNAPSHOT_SUMMARY",
+    "AGENT_TEST_SUMMARY", "AGENT_ANALYSIS_SUMMARY",
   ]),
   portal: z.enum(["skyward", "canvas"]).optional(),
   section: z.enum(["session", "students", "courses", "assignments", "grades", "messages", "upcoming",
