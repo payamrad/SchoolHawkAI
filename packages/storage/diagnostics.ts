@@ -78,9 +78,9 @@ export function createDiagnosticLog(root: string, command: DiagnosticCommand, no
     if (closed) throw new DiagnosticLogError("The private diagnostic log is closed.");
     if (event.stage) stage = event.stage;
     if (event.level === "error") failureStage ??= event.stage ?? stage;
-    if (["RUN_SUMMARY", "IMPORT_SUMMARY", "REVIEW_SUMMARY", "BRIEFING_SUMMARY"].includes(event.code) && event.status) status = event.status;
+    if (["RUN_SUMMARY", "IMPORT_SUMMARY", "REVIEW_SUMMARY", "BRIEFING_SUMMARY", "SNAPSHOT_SUMMARY"].includes(event.code) && event.status) status = event.status;
     else if (event.code === "COMMAND_FAILED") status = "failed";
-    if (count >= MAX_EVENTS && !["RUN_SUMMARY", "REVIEW_SUMMARY", "BRIEFING_SUMMARY", "COMMAND_COMPLETED", "COMMAND_FAILED"].includes(event.code)) {
+    if (count >= MAX_EVENTS && !["RUN_SUMMARY", "REVIEW_SUMMARY", "BRIEFING_SUMMARY", "SNAPSHOT_SUMMARY", "COMMAND_COMPLETED", "COMMAND_FAILED"].includes(event.code)) {
       suppressed++;
       return;
     }

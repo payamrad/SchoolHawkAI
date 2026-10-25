@@ -13,10 +13,16 @@ Usage: bash scripts/run-pipeline.sh [options]
   --login            Also log in for local-only phases; collection already requires login.
   --config <path>     Private review JSON (default: config/review.local.json).
                      Relative paths are resolved from the repository root.
-  --days <N>          Skyward message/past-assignment lookback, 1-366 (default: 7).
+  --days <N>          Override both Skyward collection lookbacks, 1-366 (default: 7;
+                     student-snapshot uses its assignment/message windows instead).
                      Upcoming/missing work, grades, and Canvas retain their full scope.
   --messages <mode>   unread (default) or all messages within the lookback.
   --format <format>   Reporting output: text (default) or json.
+  --report-type <type>
+                     briefing (default) or student-snapshot (all grades + recent work).
+  --assignment-days <N>
+                     Snapshot past-assignment window, 1-366 (default: 60).
+  --message-days <N>  Snapshot recent-message window, 1-366 (default: 14).
   --dry-run          Validate configuration and print commands without executing them.
   --help, -h         Show this help without reading configuration.
 
@@ -39,6 +45,11 @@ Use --messages all for fuller reporting/recovery only when those side effects ar
 
 Change detection runs "Review run". Reporting runs "Review briefing", which also
 reevaluates local changes/priorities and saves a review; it does not collect.
+With --report-type student-snapshot, reporting runs "Review snapshot" instead.
+It includes all retained grades, selected assignments, and new/recent messages.
+Without explicit --days/--messages overrides, snapshot pipelines collect assignments
+for --assignment-days and all messages for --message-days to populate the report.
+No school-year start date is needed. --days affects collection, not report filtering.
 Reporting is the current deterministic local summary/input, NOT a hosted AI report.
 No setup, matching approvals, scheduler, email, or SMS is performed.
 
@@ -60,6 +71,9 @@ config=config/review.local.json
 days=7
 messages=unread
 format=text
+report_type=briefing
+assignment_days=60
+message_days=14
 dry_run=false
 login=false
 declare -A provided=()
@@ -68,13 +82,13 @@ while (( $# )); do
     --help|-h) usage; exit 0 ;;
     --dry-run) dry_run=true; shift; continue ;;
     --login) login=true; shift; continue ;;
-    --phase|--config|--days|--messages|--format)
+    --phase|--config|--days|--messages|--format|--report-type|--assignment-days|--message-days)
       (( $# >= 2 )) || fail "Missing option value. Use --help."
       option=$1
       value=$2
       shift 2
       ;;
-    --phase=*|--config=*|--days=*|--messages=*|--format=*)
+    --phase=*|--config=*|--days=*|--messages=*|--format=*|--report-type=*|--assignment-days=*|--message-days=*)
       option=${1%%=*}
       value=${1#*=}
       shift
@@ -90,14 +104,25 @@ while (( $# )); do
     --days) days=$value ;;
     --messages) messages=$value ;;
     --format) format=$value ;;
+    --report-type) report_type=$value ;;
+    --assignment-days) assignment_days=$value ;;
+    --message-days) message_days=$value ;;
   esac
 done
 
 [[ "$days" =~ ^[0-9]{1,3}$ ]] || fail "--days must be an integer from 1 to 366."
 days=$((10#$days))
 (( days >= 1 && days <= 366 )) || fail "--days must be an integer from 1 to 366."
+[[ "$assignment_days" =~ ^[0-9]{1,3}$ ]] || fail "--assignment-days must be an integer from 1 to 366."
+assignment_days=$((10#$assignment_days))
+(( assignment_days >= 1 && assignment_days <= 366 )) || fail "--assignment-days must be an integer from 1 to 366."
+[[ "$message_days" =~ ^[0-9]{1,3}$ ]] || fail "--message-days must be an integer from 1 to 366."
+message_days=$((10#$message_days))
+(( message_days >= 1 && message_days <= 366 )) || fail "--message-days must be an integer from 1 to 366."
 [[ "$messages" == unread || "$messages" == all ]] || fail "--messages must be unread or all."
 [[ "$format" == text || "$format" == json ]] || fail "--format must be text or json."
+[[ "$report_type" == briefing || "$report_type" == student-snapshot ]] ||
+  fail "--report-type must be briefing or student-snapshot."
 [[ "$phase_list" != ,* && "$phase_list" != *, && "$phase_list" != *,,* ]] ||
   fail "Phase lists must not contain empty entries."
 
@@ -119,6 +144,23 @@ for phase in "${phases[@]}"; do
   esac
 done
 
+if [[ -n "${provided[--report-type]:-}" && "$reporting" != true ]]; then
+  fail "--report-type requires the reporting phase (or all)."
+fi
+if [[ ( -n "${provided[--assignment-days]:-}" || -n "${provided[--message-days]:-}" ) && "$report_type" != student-snapshot ]]; then
+  fail "--assignment-days and --message-days require --report-type student-snapshot."
+fi
+assignment_collection_days=$days
+message_collection_days=$days
+if [[ "$report_type" == student-snapshot && "$collection" == true ]]; then
+  if [[ -z "${provided[--days]:-}" ]]; then
+    assignment_collection_days=$assignment_days
+    message_collection_days=$message_days
+  else
+    printf 'PIPELINE: Explicit --days controls collection; snapshot windows may need older retained observations.\n' >&2
+  fi
+  if [[ -z "${provided[--messages]:-}" ]]; then messages=all; fi
+fi
 if [[ "$collection" == true ]]; then login=true; fi
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -283,9 +325,9 @@ if [[ "$collection" == true ]]; then
     fi
     command=(npm run "$portal:$section" --)
     case "$portal:$section" in
-      skyward:assignments) command+=("$days" --account "$account") ;;
+      skyward:assignments) command+=("$assignment_collection_days" --account "$account") ;;
       skyward:messages)
-        command+=("$days" --account "$account")
+        command+=("$message_collection_days" --account "$account")
         [[ "$messages" != all ]] || command+=(--all)
         printf 'PIPELINE: Skyward message selection is %s; opening messages may mark them read or send receipts.\n' "$messages" >&2
         ;;
@@ -312,7 +354,12 @@ if [[ "$reporting" == true ]]; then
   if [[ "$review_failed" == true ]]; then
     printf 'PIPELINE: Reporting skipped because change detection failed.\n' >&2
   else
-    command=(npm run cli -- Review briefing --config "$config")
+    report_command=briefing
+    [[ "$report_type" != student-snapshot ]] || report_command=snapshot
+    command=(npm run cli -- Review "$report_command" --config "$config")
+    if [[ "$report_type" == student-snapshot ]]; then
+      command+=(--assignment-days "$assignment_days" --message-days "$message_days")
+    fi
     [[ "$format" != text ]] || command+=(--text)
     if ! run_command reporting "${command[@]}"; then :; fi
   fi

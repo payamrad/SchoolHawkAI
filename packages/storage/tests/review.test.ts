@@ -90,6 +90,9 @@ test("all stored runs are inspected beyond existing 100/1000-row query defaults"
     assert.equal(review.changes.length, 1);
     assert.equal(review.changes[0].kind, "first-observed");
     assert.equal(review.changes[0].observedAt, new Date(Date.parse(instant) + 1004 * 1000).toISOString());
+    const snapshot = store.createStudentSnapshot(config(), new Date(later));
+    assert.equal(snapshot.totals.sourceRuns, 1005);
+    assert.equal(snapshot.totals.assignmentSourceRecords, 1);
   } finally { store.close(); }
 }, 15000);
 

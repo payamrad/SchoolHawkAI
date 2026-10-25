@@ -14,6 +14,27 @@
 			],
 			"isBackground": false,
 			"problemMatcher": []
+		},
+		{
+			"label": "SchoolHawk: collect 30 days",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"run",
+				"pipeline",
+				"--",
+				"--phase",
+				"collection",
+				"--days",
+				"30"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"focus": true,
+				"panel": "dedicated"
+			}
 		}
 	]
 }

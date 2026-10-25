@@ -5,8 +5,11 @@ import type { GradeRun } from "../schemas/grades";
 import type { MessageRun } from "../schemas/messages";
 import type { CanvasAssignmentRun } from "../schemas/canvas-assignments";
 import { assignmentMatchWindow } from "../assignment-correlation";
-import { reviewConfigSchema, type ReviewIdFactory } from "../review";
+import { reviewConfigSchema, reviewResultSchema, rulesFor, type ReviewIdFactory, type ReviewConfig } from "../review";
 import { normalizeReviewObservation, type ReviewSourceRun } from "../review-observations";
+import { detectReviewChanges } from "../change-detection";
+import { prioritizeReview } from "../prioritization";
+import type { SnapshotHistoryRun } from "../student-snapshot";
 
 export const instant = "2026-10-10T16:00:00.000Z";
 export const ids: ReviewIdFactory = (kind, parts) => `${kind}_${createHash("sha256").update(JSON.stringify(parts)).digest("hex")}`;
@@ -87,4 +90,18 @@ export function messageRun(capturedAt = instant, unread = true): MessageRun {
 
 export function observation(source: ReviewSourceRun, accountId = "parent") {
   return normalizeReviewObservation(source, accountId, ids("fingerprint", [source.run]), ids);
+}
+
+export function snapshotReview(history: SnapshotHistoryRun[], settings: ReviewConfig, now = new Date(instant)) {
+  const observations = history.map(source => normalizeReviewObservation(source, source.accountId, ids("fingerprint", [source.run]), ids));
+  const detected = detectReviewChanges(undefined, observations, settings, now.toISOString(), ids);
+  return reviewResultSchema.parse({
+    version: 1, engineVersion: 1, id: ids("review", [observations.map(source => source.runId), now.toISOString()]),
+    profileId: settings.profileId, evaluatedAt: now.toISOString(),
+    recentSince: new Date(now.getTime() - settings.briefing.recentHours * 3600000).toISOString(),
+    timeZone: settings.timeZone, rules: settings.rules,
+    childRules: settings.children.map(child => ({ childId: child.id, rules: rulesFor(settings, child.id) })),
+    briefingOptions: settings.briefing, bootstrap: true, changes: detected.changes,
+    ...prioritizeReview(detected.state, detected.changes, [], settings, now, ids), notices: detected.notices,
+  });
 }

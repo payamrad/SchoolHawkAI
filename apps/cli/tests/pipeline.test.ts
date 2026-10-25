@@ -116,6 +116,9 @@ test("pipeline help and argument validation need no configuration, database or p
       ["--phase", "collection,,reporting"], ["--phase", "all,reporting"], ["--phase", ""],
       ["--phase", "reporting", "--phase", "collection"], ["--days", "0"], ["--days", "367"],
       ["--days", "1.5"], ["--days", "999999999999"], ["--messages", "invalid"], ["--format", "pdf"], ["--unknown"],
+      ["--report-type", "unknown"], ["--phase", "collection", "--report-type", "student-snapshot"],
+      ["--assignment-days", "60"], ["--report-type", "student-snapshot", "--assignment-days", "0"],
+      ["--report-type", "student-snapshot", "--message-days", "367"],
     ]) {
       const result = fixture.run(args);
       assert.equal(result.status, 1, args.join(" "));
@@ -421,6 +424,49 @@ test("phase selection honors canonical order and reporting does not recollect or
   } finally { fixture.close(); }
 });
 
+test("student-snapshot report selection invokes full JSON or text generation without collecting or logging in", execution, () => {
+  const fixture = harness();
+  try {
+    for (const format of ["json", "text"]) {
+      const result = fixture.run(["--phase", "reporting", "--report-type", "student-snapshot", "--format", format]);
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(result.calls.map(call => call.args), [
+        ["run", "cli", "--", "Review", "snapshot", "--config", fixture.configuration,
+          "--assignment-days", "60", "--message-days", "14", ...(format === "text" ? ["--text"] : [])],
+      ]);
+    }
+    const preview = fixture.run(["--phase", "reporting", "--report-type=student-snapshot", "--dry-run"]);
+    assert.equal(preview.status, 0);
+    assert.match(preview.stderr, /Review snapshot/);
+    assert.doesNotMatch(preview.stderr, /Review briefing|skyward:login|canvas:login/);
+    assert.deepEqual(preview.calls, []);
+    const windows = fixture.run(["--phase", "reporting", "--report-type", "student-snapshot",
+      "--assignment-days", "90", "--message-days", "7", "--format", "json"]);
+    assert.equal(windows.status, 0, windows.stderr);
+    assert.deepEqual(windows.calls[0].args.slice(-4), ["--assignment-days", "90", "--message-days", "7"]);
+  } finally { fixture.close(); }
+});
+
+test("full snapshot reporting preserves collection scope and still reports after an independent collection failure", execution, () => {
+  const fixture = harness();
+  try {
+    const result = fixture.run(["--report-type", "student-snapshot", "--days", "30"], { "skyward:grades": 1 });
+    assert.equal(result.status, 1);
+    assert.deepEqual(result.calls[2].args, ["run", "skyward:assignments", "--", "30", "--account", "skyward-fixture"]);
+    assert.equal(result.calls.at(-1)!.args[4], "snapshot");
+    assert.equal(result.calls.at(-1)!.args.includes("--days"), false);
+    const defaults = fixture.run(["--report-type", "student-snapshot"]);
+    assert.equal(defaults.status, 0, defaults.stderr);
+    assert.deepEqual(defaults.calls[2].args, ["run", "skyward:assignments", "--", "60", "--account", "skyward-fixture"]);
+    assert.deepEqual(defaults.calls[4].args, ["run", "skyward:messages", "--", "14", "--account", "skyward-fixture", "--all"]);
+    const explicit = fixture.run(["--report-type", "student-snapshot", "--days", "30", "--messages", "unread"]);
+    assert.equal(explicit.status, 0, explicit.stderr);
+    assert.deepEqual(explicit.calls[4].args, ["run", "skyward:messages", "--", "30", "--account", "skyward-fixture"]);
+    const failedReport = fixture.run(["--phase", "reporting", "--report-type", "student-snapshot"], { "Review:snapshot": 1 });
+    assert.equal(failedReport.status, 1);
+    assert.match(failedReport.stderr, /reporting \(exit 1\)/);
+  } finally { fixture.close(); }
+});
 test("configuration controls the platform/section scope and relative paths resolve from the repository root", execution, () => {
   const fixture = harness(config({
     sources: [{ portal: "canvas", accountId: "only-canvas", sections: ["assignments"] }], children: [],

@@ -8,15 +8,15 @@ for the architecture and staged delivery plan.
 - `apps/collector`: Skyward messages/assignments/grades, Canvas assignments, and protected portal login.
 - `apps/cli`: local inspection, Canvas matching, `Review`, and narrowly scoped cleanup commands.
 - `packages/core`: Zod contracts, deterministic review/change detection, priorities, and source matching.
-- `packages/briefing`: bounded provider-neutral briefing input and a deterministic text fallback.
+- `packages/briefing`: bounded briefing input, full student snapshots, and deterministic text rendering.
 - `packages/storage`: persistence interfaces, SQLite implementation, migrations,
   encryption helpers, and Vitest tests.
 - `config`: public portal URLs.
 - `data`: ignored encrypted collection results and private SQLite data.
 - `playwright/.auth`: ignored browser state and encryption key.
 
-Only currently needed parts of the planned structure exist. Additional portal,
-briefing, and dashboard packages will be created when implemented.
+Only currently needed parts of the planned structure exist. Additional portal
+adapters and a dashboard will be added when implemented.
 
 ## Setup and Commands
 
@@ -98,6 +98,12 @@ bash scripts/run-pipeline.sh --phase change-detection
 bash scripts/run-pipeline.sh --phase reporting --format text
 bash scripts/run-pipeline.sh --phase change-detection,reporting --format json
 
+# Generate a student snapshot from stored data, without logging in.
+bash scripts/run-pipeline.sh --phase reporting --report-type student-snapshot --format json
+
+# Collect, detect changes, then generate the snapshot instead of the brief digest.
+bash scripts/run-pipeline.sh --phase all --report-type student-snapshot --format json
+
 # Root npm shortcut; "review" is an alias for "change-detection".
 npm run pipeline -- --phase review,reporting
 bash scripts/run-pipeline.sh --help
@@ -110,9 +116,12 @@ Options:
 | `--phase` | `all` | `login`, `collection`, `change-detection` (or `review`), `reporting`, or a comma-separated combination; every collection run logs in first |
 | `--login` | Automatic for collection | Explicitly prepend login to local-only phases; accepted but redundant for `all`/`collection` |
 | `--config` | `config/review.local.json` | Existing private review configuration; relative paths are repository-root-relative |
-| `--days` | `7` | Inclusive 1–366 day Skyward message/past-assignment window |
+| `--days` | `7` for briefing runs | Override both Skyward collection windows; snapshot runs otherwise use their separate assignment/message windows |
 | `--messages` | `unread` | Preserve the collector default, or use `all` to include read messages within the window |
-| `--format` | `text` | Deterministic text summary or bounded briefing `json` |
+| `--format` | `text` | JSON or deterministic text output for the selected report type |
+| `--report-type` | `briefing` | Small `briefing`, or full `student-snapshot`; requires the reporting phase or `all` |
+| `--assignment-days` | `60` | Past-assignment detail window for `student-snapshot`, 1–366 days |
+| `--message-days` | `14` | Recent-message window for `student-snapshot`, 1–366 days |
 | `--dry-run` | Off | Validate configuration and display exact commands without running them |
 
 Collection runs configured Skyward assignments, grades, messages, and Canvas
@@ -179,6 +188,14 @@ review/reporting may still combine multiple previously collected accounts.
 also reevaluates local changes/priorities and saves an evaluation even when selected
 alone. It is the **current model-free summary or structured AI input**, not an Azure
 report, and it performs no email/SMS delivery.
+With `--report-type student-snapshot`, reporting calls `Review snapshot` instead.
+That report includes recent assignment details, all grades, and new/recent messages.
+Snapshot pipelines default to collecting 60 days of past assignments and **all**
+messages from the recent 14-day window, so recently read messages can also provide
+context. Custom snapshot windows adjust these collection defaults. Explicit
+`--days` and `--messages` overrides are still honored and may leave report coverage
+dependent on older retained observations. `--days` does not change report filtering.
+Report generation alone does not backfill records that were never collected.
 
 Independent login/collection failures do not prevent subsequent portals or review.
 Unsupported configured sections are reported explicitly and count as failures.
@@ -412,6 +429,120 @@ provider, fields, retention policy, and delivery channel before transmitting any
 An eventual Azure AI Foundry or OpenClaw adapter can consume the same contract.
 Validating/saving model reports and email/SMS delivery are deliberately not implemented.
 `renderDeterministicBriefing` / `--text` provides a local model-free fallback.
+
+## Full Current-Student Snapshot
+
+This report is designed for an AI agent with **no conversation memory**. The
+database is treated as the current school year's dataset, so no school-year start
+date is required. All grades are retained for progress analysis, while assignment
+details and messages use explicit windows to keep context relevant. Annual database
+reset is an operator responsibility; snapshot generation never truncates or deletes data.
+
+```bash
+npm run cli -- Review snapshot --config config/review.local.json
+npm run cli -- Review snapshot --config config/review.local.json --text
+npm run pipeline -- --phase reporting --report-type student-snapshot --format json
+
+# Optional reporting windows; grades remain unfiltered.
+npm run pipeline -- --phase reporting --report-type student-snapshot \
+  --assignment-days 60 --message-days 14 --format json
+```
+
+For machine-readable JSON without npm lifecycle banners:
+
+```bash
+node --import tsx apps/cli/src/index.ts Review snapshot --config config/review.local.json
+```
+
+### Included context
+
+- **Past assignment details from the last 60 days** (approximately two months),
+  including unchanged and already-graded work. Future/upcoming, still-missing,
+  undated, and confirmed-linked assignment details remain included even when an
+  ordinary past-date filter would exclude them.
+- **All retained course/period grades and grade history**, with no date filter.
+  Older graded assignments also contribute compact grade/score histories under
+  `earlierAssignmentGrades`, without their full descriptions or instructions.
+- Assignment details and grades grouped by student and course, with source-specific
+  details, instructions/descriptions, marks, scores, due dates, grading periods,
+  section references, and unknown values preserved.
+- Observation history: consecutive identical values at the same scope quality
+  share a version with first/last timestamps, evidence references, and an
+  observation count. Changed values and changes in completeness remain visible.
+- **Recent messages from the last 14 days**, newly observed messages in the review
+  window, and messages with recently detected changes beyond read state. Recent
+  read messages can qualify, too. Older unread messages alone do not qualify.
+  Selected messages retain their full sender, subject, body, canonical sent date,
+  and observed read state. Relative display labels such as "Today" are not forwarded.
+- Deterministic attention items, recent changes, global/per-child priority rules,
+  and all collection-health warnings. Included assignments/messages retain their
+  value histories, and all grade histories remain available in the same payload.
+- Opaque, schema-validated record/source references and confirmed cross-source
+  course/assignment links, so the agent can cite evidence and avoid double counting.
+
+The current value prefers the latest complete-scope observation. If only partial
+observations exist they are included as `partial-only`; newer partial values remain
+in history even when an older complete value is preferred. Conflicting observations
+at the same time produce an ambiguous current value, not a guessed mark.
+`observedInLatestCollection` and record issues distinguish retained historical
+values from current collection coverage.
+The report records each assignment/message's `selectionReasons`, both actual date
+windows, available-record counts, and explicit exclusion counts. Grade-only
+summaries of earlier assignments are historical evidence, not outstanding work.
+
+Student grouping uses the explicit child bindings in the private review
+configuration, not name matching. Configured child aliases become report labels;
+unmapped identities remain separate and are flagged. Within Skyward, course labels
+are used for grouping, with section details retained on records. Across Skyward and
+Canvas, courses merge only through confirmed mappings; mapping section constraints
+and individual assignment links remain explicit. Counts are **source-record counts**,
+not an inferred count of unique tasks across both portals.
+
+Messages remain account-wide. Their `studentRefs` identify potentially related
+students sharing that account, not a claim that the message belongs to each child.
+`newlyObservedInReviewWindow` uses first-observed time and the configured recent
+review window (24 hours by default); it does not mean newly posted. This can include
+an older message first discovered during a recent backfill, with that distinction
+visible. Read status is the status observed
+before the collector opened the message, not a guarantee of the current website state.
+
+### Completeness, size, and privacy
+
+`omittedRecords: 0` means no records qualifying for the reporting policy were
+dropped to meet a size limit. `excludedRecords` separately counts assignment
+details and messages outside that policy; earlier assignment grades remain as
+compact summaries. This does **not** mean the school portals were fully collected. The current
+Skyward parsing gaps, collection lookbacks, unsupported sections, and stale data
+remain explicit in `collectionHealth`, record issues, and report status. Missing
+records or message bodies cannot be reconstructed by report generation.
+
+The small briefing's 40-item / 32 KiB limits do not apply to full snapshots.
+Snapshots never silently shorten selected descriptions/messages or drop
+lower-priority qualifying records. Safety limits fail explicitly: 50 MiB of output, 100,000 distinct source
+records, 500,000 retained value versions, and the existing review/source-run
+processing limits (source history is read before reporting-window selection). An eventual AI adapter must handle its own context budget,
+for example by processing student/course groups with the shared context; it must
+not silently discard records.
+
+The snapshot includes private educational text, sender/teacher details, and full
+message content. Portal/student identity keys are represented by opaque references
+and configured aliases, but **this is not anonymized data**: names or sensitive
+details may appear inside source text. Keep output private and approve the AI
+provider and its data handling before transmission. Source text remains untrusted
+data, never instructions or permission to browse or execute tools.
+
+Programmatic callers can use
+`ReviewStore.createStudentSnapshot(config, now, { assignmentDays: 60, messageDays: 14 })`.
+`buildStudentSnapshot`, `studentSnapshotSchema`, and `serializeStudentSnapshot`
+are exported by `@schoolhawk/core/student-snapshot`; text rendering is available
+from `@schoolhawk/briefing/student-snapshot`. The builder accepts typed history and
+review input and is independent of Azure, OpenClaw, or a delivery provider.
+
+Generation refreshes the deterministic review and reads source history under one
+SQLite transaction. It preserves source records and mappings; the source data and
+review history retain their existing encryption. The full snapshot is returned to
+the caller/stdout, not automatically written to a plaintext file or sent anywhere.
+Persisting validated AI-written reports and email/SMS delivery remain later stages.
 
 ## Canvas Login
 

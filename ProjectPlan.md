@@ -1,8 +1,8 @@
 # SchoolHawkAI Project Plan
 
-Updated: 2026-10-11
+Updated: 2026-10-24
 
-Status: Local collection, storage, deterministic review, and briefing-input slices are implemented. Live portal compatibility, downstream summarization/delivery, and unattended-deployment acceptance gates remain to be verified.
+Status: Local collection, storage, deterministic review, bounded briefings, and full current-student snapshots are implemented. Live portal compatibility, downstream summarization/delivery, and unattended-deployment acceptance gates remain to be verified.
 
 ## 1. Purpose and Product Boundary
 
@@ -338,6 +338,35 @@ Review audit history has no automatic retention/deletion job yet.
 
 See [README.md](README.md#deterministic-review-and-briefing-input) for commands,
 configuration, supported comparisons, privacy limits, and recovery semantics.
+
+### Full Current-Student Snapshot (Implemented Local Slice)
+
+For a reporting agent without memory, provide a separate full snapshot rather than
+only recent/high-priority changes. Treat the retained database as one school year;
+no explicit school-year start date is required, and report generation never
+performs the operator's annual database reset. Retain all grade history, with
+configurable 60-day past-assignment details and 14-day recent-message defaults.
+
+The snapshot includes recent assignments and all grades by student/course,
+including unchanged and already-graded work. Preserve older assessment grades as
+compact histories without full old assignment details. Upcoming, missing, undated,
+and confirmed-linked assignment context remains visible. Messages qualify when
+recently sent, newly observed, or recently changed beyond read state; older unread
+messages alone do not qualify. Preserve full text/history for selected messages and
+report exclusions explicitly. Include explicit child/course mappings, confirmed
+assignment links, source references, effective rules, and current collection health.
+Unknown marks, incomplete observations, stale data, and ambiguous identities remain
+qualified. Do not infer assignment completion or student well-being from missing
+data or source marks alone.
+
+Expose this as `Review snapshot` and the pipeline's
+`--report-type student-snapshot` reporting option. The bounded daily briefing
+remains available separately. Full snapshots do not apply its 40-item / 32 KiB cap:
+resource limits fail explicitly rather than silently omitting school records.
+Any future model adapter must partition oversized input without assuming memory
+or hiding missing context. The snapshot is private model input, not a generated
+AI assessment; external transmission, AI-output validation/storage, and delivery
+are still separate stages.
 
 ### Optional OpenClaw Integration
 

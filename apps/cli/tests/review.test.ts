@@ -4,8 +4,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { briefingInputSchema } from "@schoolhawk/briefing";
+import { studentSnapshotSchema, currentSnapshotVersion } from "@schoolhawk/core/student-snapshot";
 import { SqliteReviewStore } from "@schoolhawk/storage/review-sqlite";
-import { assignmentRun, config } from "../../../packages/core/tests/review-fixtures";
+import { assignment, assignmentRun, config, gradeRun, messageRun } from "../../../packages/core/tests/review-fixtures";
 import { setupDatabase } from "../../../scripts/setup-database";
 import { runCli, cliFailureMessage } from "../src/index";
 import { parseReviewArgs, ReviewUsageError } from "../src/review";
@@ -19,10 +20,16 @@ test("Review argument validation is strict and help creates no logs or database"
     assert.equal(existsSync(path.join(root, "data")), false);
     for (const args of [[], ["run"], ["run", "--config", "a", "--config=b"], ["briefing", "--config", "a", "--profile", "b"],
       ["changes", "--profile", "family", "--limit", "1001"], ["changes", "--profile", "family", "--offset", "-1"],
-      ["source", "--profile", "family"], ["__proto__", "--profile", "family"]]) {
+      ["source", "--profile", "family"], ["__proto__", "--profile", "family"], ["snapshot"],
+      ["snapshot", "--config", "a", "--limit", "10"], ["snapshot", "--config", "a", "--since", "2026-01-01"],
+      ["snapshot", "--config", "a", "--assignment-days", "0"], ["snapshot", "--config", "a", "--message-days", "367"],
+      ["snapshot", "--config", "a", "--message-days", "1.5"], ["briefing", "--config", "a", "--assignment-days", "60"]]) {
       assert.throws(() => parseReviewArgs(args), ReviewUsageError);
     }
     assert.equal(parseReviewArgs(["run", "--config", "a"]).command, "run");
+    assert.equal(parseReviewArgs(["snapshot", "--config", "a", "--text"]).command, "snapshot");
+    assert.deepEqual(parseReviewArgs(["snapshot", "--config", "a", "--assignment-days", "90", "--message-days", "7"]).snapshotOptions,
+      { assignmentDays: 90, messageDays: 7 });
     assert.match(cliFailureMessage(new ReviewUsageError("Use Review --help."), ["Review"]), /REVIEW: Use Review/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -31,7 +38,7 @@ test("missing review configuration gives setup guidance and preserves ENOENT dia
   const root = mkdtempSync(path.join(tmpdir(), "schoolhawk-review-config-"));
   context.mock.method(console, "error", () => {});
   try {
-    for (const command of ["run", "briefing"]) {
+    for (const command of ["run", "briefing", "snapshot"]) {
       const args = ["Review", command, "--config", "PRIVATE_MISSING_CONFIG.json"];
       await assert.rejects(() => runCli(args, root), error => {
         assert(error instanceof ReviewUsageError);
@@ -44,6 +51,7 @@ test("missing review configuration gives setup guidance and preserves ENOENT dia
         assert.doesNotMatch(message, /CLI command failed|PRIVATE_MISSING_CONFIG/);
         return true;
       });
+
     }
     assert.equal(existsSync(path.join(root, "data")), false);
     assert.equal(existsSync(path.join(root, "playwright")), false);
@@ -57,6 +65,62 @@ test("missing review configuration gives setup guidance and preserves ENOENT dia
       assert.equal(failure.errorType, "missing-file");
       assert.equal(failure.errorCode, "ENOENT");
       assert.doesNotMatch(log, /PRIVATE_MISSING_CONFIG/);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Review snapshot includes all grades and selected assignments/messages without sessions or diagnostic leaks", async context => {
+  const root = mkdtempSync(path.join(tmpdir(), "schoolhawk-snapshot-cli-"));
+  const output: string[] = [];
+  context.mock.method(console, "log", (value: string) => output.push(value));
+  context.mock.method(console, "error", () => {});
+  try {
+    setupDatabase(root);
+    const key = readFileSync(path.join(root, "playwright/.auth/messages.key"));
+    const store = new SqliteReviewStore(path.join(root, "data/database/schoolhawk.sqlite"), key);
+    const timestamp = new Date(Date.now() - 90 * 86400000).toISOString();
+    const message = messageRun(new Date(Date.now() - 2 * 86400000).toISOString(), false);
+    message.messages[0].sentDate = message.window.endDate;
+    message.messages[0].bodyText = "PRIVATE_COMPLETE_TEACHER_MESSAGE";
+    const oldMessage = messageRun(timestamp, true);
+    oldMessage.messages[0].id = "old-message";
+    oldMessage.messages[0].sentDate = oldMessage.window.endDate;
+    oldMessage.messages[0].bodyText = "PRIVATE_EXCLUDED_MESSAGE";
+    try {
+      store.importAssignmentRun("parent", assignmentRun(timestamp, [
+        assignment(timestamp, { grade: "A", score: "10", dueDate: message.window.endDate }),
+      ]));
+      store.importGradeRun("parent", gradeRun(timestamp, "A"));
+      store.importRun("parent", oldMessage);
+      store.importRun("parent", message);
+    } finally { store.close(); key.fill(0); }
+    writeFileSync(path.join(root, "review.json"), JSON.stringify(config({
+      sources: [{ portal: "skyward", accountId: "parent", sections: ["assignments", "grades", "messages"] }],
+      briefing: { maxItems: 1, maxBytes: 4096 },
+    })), { mode: 0o600 });
+    await runCli(["Review", "snapshot", "--config", "review.json"], root);
+    const json = output.pop()!;
+    const result = studentSnapshotSchema.parse(JSON.parse(json));
+    assert.equal(result.totals.assignmentSourceRecords, 1);
+    assert.equal(result.totals.gradeRecords, 1);
+    assert.equal(result.totals.messages, 1);
+    assert.equal(result.excludedRecords.messages, 1);
+    assert.equal(result.students[0].courses.length, 1);
+    assert.equal(currentSnapshotVersion(result.messages[0])!.data.bodyText, "PRIVATE_COMPLETE_TEACHER_MESSAGE");
+    assert.equal(result.messages[0].latestObservedUnread, false);
+    assert.equal(result.omittedRecords, 0);
+    assert.equal(result.status, "incomplete-source-coverage");
+    assert.equal(result.selection.assignments.days, 60);
+    assert.equal(result.selection.messages.days, 14);
+    assert.doesNotMatch(json, /PRIVATE_EXCLUDED_MESSAGE/);
+    await runCli(["Review", "snapshot", "--config", "review.json", "--text"], root);
+    assert.match(output.pop()!, /PRIVATE_COMPLETE_TEACHER_MESSAGE/);
+    assert.equal(existsSync(path.join(root, "playwright/.auth/skyward.json")), false);
+    for (const file of readdirSync(path.join(root, "logs"))) {
+      const log = readFileSync(path.join(root, "logs", file), "utf8");
+      assert.match(log, /SNAPSHOT_SUMMARY/);
+      assert.match(log, /"status":"partial"/);
+      assert.doesNotMatch(log, /PRIVATE_COMPLETE|PRIVATE_TITLE|PRIVATE_STUDENT|PRIVATE_SENDER|PRIVATE_TEACHER/);
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

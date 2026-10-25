@@ -4,6 +4,8 @@ import { parseArgs } from "node:util";
 import { ReviewError, reviewConfigSchema, reviewIdSchema, reviewTimestamp, type ReviewConfig } from "@schoolhawk/core/review";
 import { diagnosticErrorCode, reportDiagnostic } from "@schoolhawk/core/diagnostics";
 import { buildBriefingInput, renderDeterministicBriefing, serializeBriefingInput } from "@schoolhawk/briefing";
+import { renderStudentSnapshot, serializeStudentSnapshot } from "@schoolhawk/briefing/student-snapshot";
+import { studentSnapshotOptionsSchema } from "@schoolhawk/core/student-snapshot";
 import { checkPrivatePath } from "@schoolhawk/storage/private-files";
 import { withReviewStore } from "@schoolhawk/storage/review-sqlite";
 
@@ -11,6 +13,7 @@ const HELP = `Local deterministic review (no portal access, model calls, or deli
 
   Review run --config <private-json>
   Review briefing --config <private-json> [--text]
+  Review snapshot --config <private-json> [--assignment-days N] [--message-days N] [--text]
   Review changes --profile <id> [--since <ISO timestamp>] [--limit N] [--offset N]
   Review priorities --profile <id> [--review <id>] [--limit N --offset N]
   Review status --profile <id> [--review <id>] [--limit N --offset N]
@@ -20,6 +23,15 @@ const HELP = `Local deterministic review (no portal access, model calls, or deli
 run processes new stored observations and saves an encrypted review evaluation.
 briefing also evaluates current time-based rules, then prints bounded provider-neutral
 JSON, or a deterministic local text summary with --text.
+snapshot returns past assignments (60 days by default) and all retained grades by
+student/course, including histories, priorities, and collection health.
+Upcoming, missing, undated, and confirmed-linked assignment details are retained.
+Older assignment grades/scores remain as compact histories without full details.
+Messages are recent (14 days by default), newly observed, or recently changed beyond
+read state. Both read/unread messages can qualify; full content is retained.
+The database defines the school year for grades; no start date or reset is needed.
+The small briefing's item/byte limits do not truncate snapshots; oversized snapshots
+fail explicitly. Output contains private school text; nothing is sent externally.
 Inspection commands read saved results; check evaluatedAt before treating them as current.
 Configuration must be a private regular file owned by the current user (0600).
 First-time setup, from the repository root (only when the local file is missing):
@@ -75,12 +87,14 @@ export function parseReviewArgs(args: string[]) {
         config: { type: "string" }, profile: { type: "string" }, review: { type: "string" },
         source: { type: "string" }, since: { type: "string" }, limit: { type: "string" },
         offset: { type: "string" }, text: { type: "boolean" },
+        "assignment-days": { type: "string" }, "message-days": { type: "string" },
       },
     });
     if (positionals.length !== 1) throw new Error();
     const command = positionals[0];
     const allowed: Record<string, string[]> = {
-      run: ["config"], briefing: ["config", "text"], changes: ["profile", "since", "limit", "offset"],
+      run: ["config"], briefing: ["config", "text"], snapshot: ["config", "text", "assignment-days", "message-days"],
+      changes: ["profile", "since", "limit", "offset"],
       priorities: ["profile", "review", "limit", "offset"], status: ["profile", "review", "limit", "offset"],
       source: ["profile", "review", "source"],
     };
@@ -88,7 +102,7 @@ export function parseReviewArgs(args: string[]) {
     for (const key of Object.keys(values)) {
       if (!allowed[command].includes(key) || args.filter(arg => arg === `--${key}` || arg.startsWith(`--${key}=`)).length !== 1) throw new Error();
     }
-    if (command === "run" || command === "briefing") {
+    if (command === "run" || command === "briefing" || command === "snapshot") {
       if (!values.config) throw new Error();
     } else if (!values.profile || !/^[a-zA-Z0-9_-]{1,100}$/.test(values.profile)) throw new Error();
     if (values.review) reviewIdSchema.parse(values.review);
@@ -99,7 +113,14 @@ export function parseReviewArgs(args: string[]) {
     const offset = Number(values.offset ?? "0");
     if (!/^\d+$/.test(values.limit ?? "100") || !Number.isInteger(limit) || limit < 1 || limit > 1000 ||
         !/^\d+$/.test(values.offset ?? "0") || !Number.isSafeInteger(offset)) throw new Error();
-    return { command, values, limit, offset };
+    for (const key of ["assignment-days", "message-days"] as const) {
+      if (values[key] !== undefined && !/^\d{1,3}$/.test(values[key])) throw new Error();
+    }
+    const snapshotOptions = studentSnapshotOptionsSchema.parse({
+      assignmentDays: values["assignment-days"] === undefined ? undefined : Number(values["assignment-days"]),
+      messageDays: values["message-days"] === undefined ? undefined : Number(values["message-days"]),
+    });
+    return { command, values, limit, offset, snapshotOptions };
   } catch { throw new ReviewUsageError("Invalid Review arguments. Use npm run cli -- Review --help. No collection or model call was attempted."); }
 }
 
@@ -111,6 +132,12 @@ export async function runReviewCli(args: string[], root: string): Promise<void> 
   const config = values.config ? readReviewConfig(path.resolve(root, values.config)) : undefined;
   await withReviewStore(root, store => {
     reportDiagnostic({ level: "info", code: "STAGE_STARTED", stage: "CLI_COMMAND" });
+    if (input.command === "snapshot") {
+      if (!config) throw new ReviewUsageError("A private review configuration is required.");
+      const snapshot = store.createStudentSnapshot(config, new Date(), input.snapshotOptions);
+      console.log(values.text ? renderStudentSnapshot(snapshot) : serializeStudentSnapshot(snapshot));
+      return;
+    }
     if (input.command === "run" || input.command === "briefing") {
       if (!config) throw new ReviewUsageError("A private review configuration is required.");
       const review = store.processReview(config);
