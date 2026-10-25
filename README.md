@@ -290,10 +290,29 @@ stops `Review run` and `Review briefing` before database access and reports the 
 command above; it is not a database/key failure. Copy the template only when the
 local configuration is missing, then edit it before reviewing real accounts.
 Never put credentials in this file. `children[].id` should be a local pseudonym;
-bindings explicitly associate that child with portal/account/student IDs. No names
-are used to infer identity. Missing bindings remain visible as `unmapped-student`.
-Existing confirmed Canvas/Skyward assignment links are reused; review never creates
-new mappings or matches.
+bindings associate that child with portal/account/student IDs. The default
+`studentMatching: "bindings"` preserves explicit-only identity matching.
+Opt in to `studentMatching: "unique-full-name"` to reconcile the same child across
+different portal IDs within the configured family accounts. Keep at least one
+known binding per child as an anchor; an additional portal identity can then join
+that child by its full name without another manual binding. Duplicate configured
+child aliases with the same verified full name and effective rules also combine;
+the alphabetically first alias becomes the report label.
+
+Full-name comparison normalizes case, whitespace, Unicode, and `Last, First`
+versus `First Last` order. Structured first/last fields or a sortable full name
+take precedence over a display label. It does not use first-name-only, initial,
+nickname, or fuzzy matching. Incomplete historical labels cannot override a full
+name for the same source identity. Conflicting full-name history, duplicate names
+on distinct children in one portal account, or conflicting child rules prevent
+automatic merging and produce explicit identity warnings. Existing explicit
+bindings remain authoritative; unmatched identities stay separate and flagged.
+Source IDs, observations, and provenance are never rewritten or deduplicated.
+
+Resolved bindings are saved in the encrypted review evaluation and reused by
+both briefing and snapshot generation. Names and raw student IDs are not added to
+the minimized briefing or diagnostic logs. Course/assignment matching remains a
+separate operation: review reuses confirmed links but never creates them.
 
 Choose only the accounts and sections you intend to review. Assignments from both
 portals, Skyward grades, and Skyward messages are supported. Configuring attendance,
@@ -301,9 +320,10 @@ calendar, announcements, forms, or another unsupported portal/section combinatio
 produces an explicit unsupported-coverage warning, not an empty success.
 
 `profileId` names an independent review baseline. After first use, changing its
-source selection or child bindings requires a new profile ID. Rules and briefing
-limits can be changed without resetting baselines. The old profile and its audit
-history remain intact.
+source selection, configured child bindings, or student-matching mode requires a
+new profile ID. Newly collected identities resolved automatically by name do not
+reset source-record baselines. Rules and briefing limits can be changed without
+resetting baselines. The old profile and its audit history remain intact.
 
 ### Run and inspect
 
@@ -490,9 +510,11 @@ The report records each assignment/message's `selectionReasons`, both actual dat
 windows, available-record counts, and explicit exclusion counts. Grade-only
 summaries of earlier assignments are historical evidence, not outstanding work.
 
-Student grouping uses the explicit child bindings in the private review
-configuration, not name matching. Configured child aliases become report labels;
-unmapped identities remain separate and are flagged. Within Skyward, course labels
+Student grouping uses the same resolved child identities as deterministic review:
+explicit bindings by default, or conservative full-name matching when enabled in
+the private configuration. Canonical child aliases become report labels; unresolved
+identities remain separate and flagged. Name matching combines students, not school
+records: every qualifying source record and history remains included. Within Skyward, course labels
 are used for grouping, with section details retained on records. Across Skyward and
 Canvas, courses merge only through confirmed mappings; mapping section constraints
 and individual assignment links remain explicit. Counts are **source-record counts**,
@@ -537,6 +559,11 @@ Programmatic callers can use
 are exported by `@schoolhawk/core/student-snapshot`; text rendering is available
 from `@schoolhawk/briefing/student-snapshot`. The builder accepts typed history and
 review input and is independent of Azure, OpenClaw, or a delivery provider.
+For name-matched input, use a review containing its `resolvedChildren`; the pure
+builder rejects missing or mismatched resolution metadata instead of regrouping
+the snapshot differently from its review. Name resolution reads retained student
+identity history with explicit limits of 200,000 identity observations and 100,000
+distinct source identities; it never silently skips records to meet those limits.
 
 Generation refreshes the deterministic review and reads source history under one
 SQLite transaction. It preserves source records and mappings; the source data and

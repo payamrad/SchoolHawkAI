@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { test } from "vitest";
 import { currentSnapshotVersion, serializeStudentSnapshot, studentSnapshotSchema } from "@schoolhawk/core/student-snapshot";
-import { assignment, assignmentRun, config, gradeRun, instant, messageRun } from "../../core/tests/review-fixtures";
+import { buildBriefingInput, serializeBriefingInput } from "../../briefing/index";
+import { withDiagnosticSink } from "@schoolhawk/core/diagnostics";
+import { assignment, assignmentRun, config, gradeRun, instant, messageRun, namedFamilyFixture } from "../../core/tests/review-fixtures";
 import { SqliteReviewStore } from "../sqlite-review-store";
 
 test("snapshot storage API includes unchanged old records and full message history without modifying sources", () => {
@@ -134,5 +136,84 @@ test("a recently detected content change can include an older message without tr
     assert.equal(snapshot.messages[0].newlyObservedInReviewWindow, false);
     assert.equal(currentSnapshotVersion(snapshot.messages[0])!.data.bodyText, "UPDATED_TEACHER_REQUEST");
     assert.equal(snapshot.excludedRecords.messages, 1);
+  } finally { store.close(); }
+});
+
+test("name-matched reviews, briefings and snapshots have two children while preserving legacy review and source history", () => {
+  const store = new SqliteReviewStore(":memory:", randomBytes(32));
+  const { settings, skyward, canvas } = namedFamilyFixture();
+  const oldConfig = config({ ...settings, studentMatching: "bindings" });
+  try {
+    store.importAssignmentRun("parent", skyward);
+    store.importCanvasAssignmentRun("canvas-parent", canvas);
+    const oldSnapshot = store.createStudentSnapshot(oldConfig, new Date(instant));
+    const oldReview = store.getReview("family")!;
+    const oldChanges = store.listReviewChanges("family");
+    assert.equal(oldSnapshot.totals.students, 3);
+    assert.throws(() => store.processReview(settings, new Date(instant)), /Use a new profileId/);
+    settings.profileId = "family-names";
+    const review = store.processReview(settings, new Date(instant));
+    assert.deepEqual(review.childRules.map(child => child.childId), ["avery", "casey"]);
+    assert.equal(review.resolvedChildren![0].bindings.length, 2);
+    assert.deepEqual(store.getReview("family-names"), review);
+    const briefing = buildBriefingInput(review);
+    assert.equal(briefing.children.length, 2);
+    assert.doesNotMatch(serializeBriefingInput(briefing), /Quinn|Rowan|student-1|canvas-avery|resolvedChildren/);
+    const snapshot = store.createStudentSnapshot(settings, new Date(instant));
+    assert.equal(snapshot.totals.students, 2);
+    assert.deepEqual(snapshot.students.map(student => student.label), ["avery", "casey"]);
+    assert.equal(snapshot.totals.assignmentSourceRecords, oldSnapshot.totals.assignmentSourceRecords);
+    assert.equal(snapshot.totals.semanticVersions, oldSnapshot.totals.semanticVersions);
+    assert.equal(snapshot.totals.retainedObservationCount, oldSnapshot.totals.retainedObservationCount);
+    assert.equal(snapshot.sources.length, oldSnapshot.sources.length);
+    assert.equal(snapshot.omittedRecords, 0);
+    assert.equal(snapshot.students[0].courses.flatMap(course => course.assignments).length, 2);
+    assert.deepEqual(store.getAssignmentRun("parent", skyward.runId), skyward);
+    assert.deepEqual(store.getCanvasAssignmentRun("canvas-parent", canvas.runId), canvas);
+    assert.deepEqual(store.getReview("family"), oldReview);
+    assert.deepEqual(store.listReviewChanges("family"), oldChanges);
+    assert.deepEqual(store.createStudentSnapshot(settings, new Date(instant)), snapshot);
+  } finally { store.close(); }
+});
+
+test("a later Canvas identity resolves by name without a baseline reset or duplicate Skyward changes", () => {
+  const store = new SqliteReviewStore(":memory:", randomBytes(32));
+  const { settings, skyward, canvas } = namedFamilyFixture();
+  settings.children = settings.children.filter(child => child.id !== "canvas-avery");
+  settings.children[0].rules = { upcomingDays: 14 };
+  try {
+    store.importAssignmentRun("parent", skyward);
+    const before = store.processReview(settings, new Date(instant));
+    assert.equal(before.resolvedChildren![0].bindings.length, 1);
+    store.importCanvasAssignmentRun("canvas-parent", canvas);
+    const after = store.processReview(settings, new Date("2026-10-10T17:00:00Z"));
+    assert.equal(after.bootstrap, false);
+    assert.equal(after.resolvedChildren![0].bindings.length, 2);
+    assert.equal(after.actions.find(action => action.facts?.gradingScale === "points")!.childId, "avery");
+    assert.equal(after.childRules.find(child => child.childId === "avery")!.rules.upcomingDays, 14);
+    assert.deepEqual(after.changes.filter(change => change.after.portal === "skyward"), before.changes);
+    const snapshot = store.createStudentSnapshot(settings, new Date("2026-10-10T17:00:00Z"));
+    assert.equal(snapshot.totals.students, 2);
+    assert.equal(snapshot.totals.assignmentSourceRecords, 3);
+  } finally { store.close(); }
+});
+
+test("ambiguous full names remain separate and prevent unqualified complete reports", () => {
+  const store = new SqliteReviewStore(":memory:", randomBytes(32));
+  const { settings, skyward, canvas } = namedFamilyFixture();
+  Object.assign(skyward.students[1], { name: "QUINN, AVERY", firstName: "Avery", lastName: "Quinn" });
+  try {
+    store.importAssignmentRun("parent", skyward);
+    store.importCanvasAssignmentRun("canvas-parent", canvas);
+    withDiagnosticSink(() => {}, () => {
+      const review = store.processReview(settings, new Date(instant));
+      assert(review.notices.includes("student-name-ambiguous"));
+      assert.equal(buildBriefingInput(review).conclusion, "incomplete");
+      const snapshot = store.createStudentSnapshot(settings, new Date(instant));
+      assert.equal(snapshot.totals.students, 3);
+      assert.equal(snapshot.status, "incomplete-source-coverage");
+      assert(snapshot.notices.includes("student-name-ambiguous"));
+      assert.equal(snapshot.totals.assignmentSourceRecords, 3);
+    });
   } finally { store.close(); }
 });

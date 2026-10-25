@@ -39,6 +39,9 @@ First-time setup, from the repository root (only when the local file is missing)
 Then edit its account aliases and student bindings before running review.
 Explicit inspection can print private data; protect terminal output. Nothing is sent.
 Use a new profileId when changing source accounts/sections or child bindings.
+Set studentMatching to "unique-full-name" in configuration to reconcile verified full
+names across authorized portal identities. Ambiguous names remain separate and flagged.
+Changing the matching mode requires a new profileId; source records are preserved.
 `;
 
 export class ReviewUsageError extends Error {

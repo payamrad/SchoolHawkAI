@@ -1,6 +1,6 @@
 # SchoolHawkAI Project Plan
 
-Updated: 2026-10-24
+Updated: 2026-10-25
 
 Status: Local collection, storage, deterministic review, bounded briefings, and full current-student snapshots are implemented. Live portal compatibility, downstream summarization/delivery, and unattended-deployment acceptance gates remain to be verified.
 
@@ -201,6 +201,13 @@ Primary entities are `ChildProfile`, `Assignment`, `GradeRecord`, `Message`, `An
 
 Use configurable internal child identifiers, not names embedded in algorithms. Every entity carries source metadata: portal, account scope, source URL, capture time, parser version, and optional evidence reference. Account scope must distinguish records collected through different accounts without storing credentials in identifiers.
 
+Portal student IDs identify source records, not necessarily different children.
+Review can opt in to conservative full-name matching within configured family
+accounts, anchored by explicit child bindings. Normalize case, whitespace, and
+name order; do not use first-name-only or fuzzy matching. Ambiguous names,
+conflicting name history, and conflicting child rules remain qualified rather
+than being silently merged. Preserve original source identities and history.
+
 Important domain fields include:
 
 - Assignments: title, course, assigned/due/submitted dates, explicit status, score, points possible, and teacher where available.
@@ -317,6 +324,12 @@ The deterministic review engine and briefing-input builder have no model/provide
 dependency. Local `Review` commands process stored Skyward/Canvas assignments,
 Skyward grades/messages, and collection health. Explicit configuration supplies
 account scope, child bindings, rules, and payload limits.
+Opt-in `unique-full-name` student matching reconciles cross-portal identities
+before change rules and priorities are evaluated. Persist the resolved bindings
+with each encrypted evaluation so bounded briefings and full snapshots agree on
+the children. Changing configured bindings or matching mode requires a new review
+profile; automatically recognizing a newly collected portal identity does not
+reset source-record baselines. Existing profiles and audit history are retained.
 
 Migration 007 persists encrypted checkpoints, idempotent immutable events, and
 evaluation snapshots transactionally. First processing establishes baselines rather
@@ -353,7 +366,7 @@ compact histories without full old assignment details. Upcoming, missing, undate
 and confirmed-linked assignment context remains visible. Messages qualify when
 recently sent, newly observed, or recently changed beyond read state; older unread
 messages alone do not qualify. Preserve full text/history for selected messages and
-report exclusions explicitly. Include explicit child/course mappings, confirmed
+report exclusions explicitly. Include resolved child identities, explicit course mappings, confirmed
 assignment links, source references, effective rules, and current collection health.
 Unknown marks, incomplete observations, stale data, and ambiguous identities remain
 qualified. Do not infer assignment completion or student well-being from missing

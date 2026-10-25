@@ -74,7 +74,11 @@ export function buildStudentSnapshot(
   history: Iterable<SnapshotHistoryRun>, input: ReviewConfig, review: ReviewResult,
   links: SnapshotLinks, ids: ReviewIdFactory, inputOptions: StudentSnapshotOptions = {},
 ): StudentSnapshot {
-  const config = reviewConfigSchema.parse(input);
+  const requested = reviewConfigSchema.parse(input);
+  if ((requested.studentMatching === "unique-full-name") !== (review.resolvedChildren !== undefined)) {
+    throw new ReviewError("Snapshot student matching does not match its saved review. Generate a review using the same configuration first.");
+  }
+  const config = reviewConfigSchema.parse({ ...requested, children: review.resolvedChildren ?? requested.children });
   const options = studentSnapshotOptionsSchema.parse(inputOptions);
   if (review.profileId !== config.profileId) throw new ReviewError("Snapshot configuration does not match its review profile.");
   const now = new Date(review.evaluatedAt);

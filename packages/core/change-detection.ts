@@ -8,7 +8,7 @@ export function reviewIdentityHash(config: ReviewConfig, ids: ReviewIdFactory): 
   const sources = config.sources.map(source => [source.portal, source.accountId, source.sections.slice().sort()]).sort();
   const children = config.children.map(child => [child.id,
     child.bindings.map(binding => [binding.portal, binding.accountId, binding.studentId]).sort()]).sort();
-  return ids("identity", [sources, children]);
+  return ids("identity", config.studentMatching === "unique-full-name" ? [sources, children, config.studentMatching] : [sources, children]);
 }
 
 export function compareReviewFields(before: ReviewFields, after: ReviewFields): ReviewChange["fields"] {
@@ -39,8 +39,9 @@ export interface ChangeDetectionResult {
 }
 
 export function detectReviewChanges(previous: ReviewState | undefined, observations: ReviewObservation[],
-  config: ReviewConfig, evaluatedAt: string, ids: ReviewIdFactory): ChangeDetectionResult {
-  const identityHash = reviewIdentityHash(config, ids);
+  config: ReviewConfig, evaluatedAt: string, ids: ReviewIdFactory, identityConfig = config): ChangeDetectionResult {
+  // Newly collected portal identities can resolve by name without resetting source-record baselines.
+  const identityHash = reviewIdentityHash(identityConfig, ids);
   if (previous && previous.identityHash !== identityHash) {
     throw new ReviewError("Review sources or child bindings changed. Use a new profileId to establish a new baseline; existing history was preserved.");
   }

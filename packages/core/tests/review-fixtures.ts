@@ -9,6 +9,7 @@ import { reviewConfigSchema, reviewResultSchema, rulesFor, type ReviewIdFactory,
 import { normalizeReviewObservation, type ReviewSourceRun } from "../review-observations";
 import { detectReviewChanges } from "../change-detection";
 import { prioritizeReview } from "../prioritization";
+import { resolveReviewStudents } from "../student-identity";
 import type { SnapshotHistoryRun } from "../student-snapshot";
 
 export const instant = "2026-10-10T16:00:00.000Z";
@@ -78,6 +79,32 @@ export function canvasRun(capturedAt = instant, empty = false): CanvasAssignment
   };
 }
 
+export function namedFamilyFixture(capturedAt = instant) {
+  const skyward = assignmentRun(capturedAt);
+  Object.assign(skyward.students[0], { name: "QUINN, AVERY", firstName: "Avery", lastName: "Quinn" });
+  skyward.students.push({ ...structuredClone(skyward.students[0]),
+    id: "student-2", name: "ROWAN, CASEY", firstName: "Casey", lastName: "Rowan" });
+  const canvas = canvasRun(capturedAt);
+  Object.assign(canvas.students[0], { name: "  avery   QUINN  ", sortableName: "Quinn, Avery" });
+  const settings = config({
+    studentMatching: "unique-full-name",
+    sources: [
+      { portal: "skyward", accountId: "parent", sections: ["assignments"] },
+      { portal: "canvas", accountId: "canvas-parent", sections: ["assignments"] },
+    ],
+    children: [
+      { id: "avery", bindings: [{ portal: "skyward", accountId: "parent", studentId: "student-1" }] },
+      { id: "casey", bindings: [{ portal: "skyward", accountId: "parent", studentId: "student-2" }] },
+      { id: "canvas-avery", bindings: [{ portal: "canvas", accountId: "canvas-parent", studentId: "10" }] },
+    ],
+  });
+  const history: SnapshotHistoryRun[] = [
+    { portal: "skyward", section: "assignments", accountId: "parent", run: skyward },
+    { portal: "canvas", section: "assignments", accountId: "canvas-parent", run: canvas },
+  ];
+  return { skyward, canvas, settings, history };
+}
+
 export function messageRun(capturedAt = instant, unread = true): MessageRun {
   return {
     runId: randomUUID(), capturedAt, parserVersion: 1, status: "complete",
@@ -93,15 +120,19 @@ export function observation(source: ReviewSourceRun, accountId = "parent") {
 }
 
 export function snapshotReview(history: SnapshotHistoryRun[], settings: ReviewConfig, now = new Date(instant)) {
+  const resolution = resolveReviewStudents(settings, history);
+  const resolved = resolution.config;
   const observations = history.map(source => normalizeReviewObservation(source, source.accountId, ids("fingerprint", [source.run]), ids));
-  const detected = detectReviewChanges(undefined, observations, settings, now.toISOString(), ids);
+  const detected = detectReviewChanges(undefined, observations, resolved, now.toISOString(), ids, settings);
   return reviewResultSchema.parse({
     version: 1, engineVersion: 1, id: ids("review", [observations.map(source => source.runId), now.toISOString()]),
     profileId: settings.profileId, evaluatedAt: now.toISOString(),
     recentSince: new Date(now.getTime() - settings.briefing.recentHours * 3600000).toISOString(),
     timeZone: settings.timeZone, rules: settings.rules,
-    childRules: settings.children.map(child => ({ childId: child.id, rules: rulesFor(settings, child.id) })),
+    childRules: resolved.children.map(child => ({ childId: child.id, rules: rulesFor(resolved, child.id) })),
+    ...(settings.studentMatching === "unique-full-name" ? { resolvedChildren: resolved.children } : {}),
     briefingOptions: settings.briefing, bootstrap: true, changes: detected.changes,
-    ...prioritizeReview(detected.state, detected.changes, [], settings, now, ids), notices: detected.notices,
+    ...prioritizeReview(detected.state, detected.changes, [], resolved, now, ids),
+    notices: [...new Set([...detected.notices, ...resolution.notices])],
   });
 }

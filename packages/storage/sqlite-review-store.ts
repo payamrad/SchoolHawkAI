@@ -7,6 +7,7 @@ import {
 import { detectReviewChanges } from "@schoolhawk/core/change-detection";
 import { normalizeReviewObservation, reviewRecordId, reviewStreamId, type ReviewSourceRun } from "@schoolhawk/core/review-observations";
 import { prioritizeReview, type ConfirmedReviewLink } from "@schoolhawk/core/prioritization";
+import { resolveReviewStudents } from "@schoolhawk/core/student-identity";
 import { buildStudentSnapshot, studentSnapshotOptionsSchema,
   type SnapshotHistoryRun, type SnapshotLinks, type StudentSnapshot, type StudentSnapshotOptions } from "@schoolhawk/core/student-snapshot";
 import { reportDiagnostic } from "@schoolhawk/core/diagnostics";
@@ -68,25 +69,25 @@ export class SqliteReviewStore extends SqliteCanvasStore implements ReviewStore 
     return { portal: "skyward", section: "messages", run };
   }
 
+  private *sourceHistory(config: ReviewConfig): Iterable<SnapshotHistoryRun> {
+    for (const source of this.sourceReferences(config)) {
+      yield { accountId: source.accountId,
+        ...this.readSourceRun(source.portal, source.section, source.accountId, source.reference.run_id) };
+    }
+  }
+
   createStudentSnapshot(input: ReviewConfig, now = new Date(), inputOptions: StudentSnapshotOptions = {}): StudentSnapshot {
     const config = reviewConfigSchema.parse(input);
     const options = studentSnapshotOptionsSchema.parse(inputOptions);
     return this.database.transaction(() => {
       const review = this.processReview(config, now);
       reportDiagnostic({ level: "info", code: "STAGE_STARTED", stage: "STUDENT_SNAPSHOT" });
-      const store = this;
-      function* history(): Iterable<SnapshotHistoryRun> {
-        for (const source of store.sourceReferences(config)) {
-          yield { accountId: source.accountId,
-            ...store.readSourceRun(source.portal, source.section, source.accountId, source.reference.run_id) };
-        }
-      }
       const links: SnapshotLinks = { courses: [], assignments: [] };
       for (const source of config.sources) if (source.portal === "canvas" && source.sections.includes("assignments")) {
         links.courses.push(...this.listCanvasCourseMappings(source.accountId).map(mapping => ({ accountId: source.accountId, mapping })));
         links.assignments.push(...this.listCanvasAssignmentLinks(source.accountId).map(link => ({ accountId: source.accountId, link })));
       }
-      const result = buildStudentSnapshot(history(), config, review, links, this.reviewIds(config), options);
+      const result = buildStudentSnapshot(this.sourceHistory(config), config, review, links, this.reviewIds(config), options);
       const accepted = result.totals.assignmentSourceRecords + result.totals.gradeRecords +
         result.totals.earlierAssignmentGradeRecords + result.totals.messages;
       const available = result.availableRecords.assignments + result.availableRecords.grades + result.availableRecords.messages;
@@ -99,11 +100,13 @@ export class SqliteReviewStore extends SqliteCanvasStore implements ReviewStore 
   }
 
   processReview(input: ReviewConfig, now = new Date()): ReviewResult {
-    const config = reviewConfigSchema.parse(input);
+    const requested = reviewConfigSchema.parse(input);
     const evaluatedAt = reviewTimestamp.parse(now.toISOString());
-    const ids = this.reviewIds(config);
+    const ids = this.reviewIds(requested);
     reportDiagnostic({ level: "info", code: "STAGE_STARTED", stage: "REVIEW_PROCESS" });
     return this.database.transaction(() => {
+      const resolution = resolveReviewStudents(requested, this.sourceHistory(requested));
+      const config = resolution.config;
       const saved = this.database.prepare("SELECT payload FROM review_profiles WHERE profile_id = ?").get(config.profileId);
       const previous = saved ? reviewStateSchema.parse(this.unseal(storedPayload.parse(saved).payload,
         JSON.stringify(["review-state", config.profileId]))) : undefined;
@@ -126,7 +129,8 @@ export class SqliteReviewStore extends SqliteCanvasStore implements ReviewStore 
           if (observationBytes > 50 * 1024 * 1024) throw new ReviewError("A review batch exceeds 50 MiB of normalized input. Archive or narrow source history.");
           observations.push(observation);
       }
-      const detected = detectReviewChanges(previous, observations, config, evaluatedAt, ids);
+      const detected = detectReviewChanges(previous, observations, config, evaluatedAt, ids, requested);
+      detected.notices = [...new Set([...detected.notices, ...resolution.notices])];
       this.database.prepare(`INSERT INTO review_profiles VALUES (?, ?, ?)
         ON CONFLICT(profile_id) DO UPDATE SET updated_at = excluded.updated_at, payload = excluded.payload`)
         .run(config.profileId, evaluatedAt, this.seal(detected.state, JSON.stringify(["review-state", config.profileId])));
@@ -164,6 +168,7 @@ export class SqliteReviewStore extends SqliteCanvasStore implements ReviewStore 
         id: ids("review", [evaluatedAt, config, detected.state, changes.map(change => change.id), links]),
         profileId: config.profileId, evaluatedAt, recentSince, timeZone: config.timeZone,
         rules: config.rules, childRules: config.children.map(child => ({ childId: child.id, rules: rulesFor(config, child.id) })),
+        ...(config.studentMatching === "unique-full-name" ? { resolvedChildren: config.children } : {}),
         briefingOptions: config.briefing, bootstrap: detected.bootstrap, changes, ...prioritized, notices: detected.notices,
       });
       const existing = this.getReview(config.profileId, result.id);

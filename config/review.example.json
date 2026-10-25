@@ -2,6 +2,7 @@
   "version": 1,
   "profileId": "family",
   "timeZone": "America/Los_Angeles",
+  "studentMatching": "bindings",
   "sources": [
     { "portal": "skyward", "accountId": "skyward-parent", "sections": ["assignments", "grades", "messages"] },
     { "portal": "canvas", "accountId": "canvas-parent", "sections": ["assignments"] }

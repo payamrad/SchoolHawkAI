@@ -37,19 +37,21 @@ export const briefingOptionsSchema = z.object({
 const bindingSchema = z.object({
   portal: reviewPortalSchema, accountId: alias, studentId: identity,
 }).strict();
+const reviewChildSchema = z.object({
+  id: alias,
+  bindings: z.array(bindingSchema).min(1).max(20),
+  rules: ruleValuesSchema.partial().optional(),
+}).strict();
 export const reviewConfigSchema = z.object({
   version: z.literal(1),
   profileId: alias,
   timeZone: reviewTimeZoneSchema.default("America/Los_Angeles"),
+  studentMatching: z.enum(["bindings", "unique-full-name"]).default("bindings"),
   sources: z.array(z.object({
     portal: reviewPortalSchema, accountId: alias,
     sections: z.array(reviewSectionSchema).min(1).max(7),
   }).strict()).min(1).max(20),
-  children: z.array(z.object({
-    id: alias,
-    bindings: z.array(bindingSchema).min(1).max(20),
-    rules: ruleValuesSchema.partial().optional(),
-  }).strict()).max(100).default([]),
+  children: z.array(reviewChildSchema).max(100).default([]),
   rules: ruleValuesSchema.partial().default({}).transform(value => ({ ...defaultRules, ...value })),
   briefing: briefingOptionsSchema.prefault({}),
 }).strict().superRefine((config, context) => {
@@ -62,6 +64,9 @@ export const reviewConfigSchema = z.object({
       config.children.some(child => child.bindings.some(binding => !config.sources.some(source =>
         source.portal === binding.portal && source.accountId === binding.accountId)))) {
     context.addIssue({ code: "custom", message: "Duplicate or unconfigured review source/child binding." });
+  }
+  if (config.studentMatching === "unique-full-name" && !config.children.length) {
+    context.addIssue({ code: "custom", message: "Full-name matching requires a configured child binding to anchor student identity." });
   }
 });
 export type ReviewConfig = z.infer<typeof reviewConfigSchema>;
@@ -212,6 +217,7 @@ export const healthIssueSchema = z.enum([
   "collection-incomplete", "collection-stale", "never-collected", "unsupported-section", "unmapped-student",
   "lookback-limited", "unread-only", "scope-not-observed", "record-not-observed",
   "source-conflict", "late-observations-ignored", "source-history-changed",
+  "student-name-ambiguous", "student-name-unverified",
 ]);
 export type HealthIssue = z.infer<typeof healthIssueSchema>;
 export const healthSchema = z.object({
@@ -254,6 +260,7 @@ export const reviewResultSchema = z.object({
   evaluatedAt: reviewTimestamp, recentSince: reviewTimestamp, timeZone: reviewTimeZoneSchema,
   rules: priorityRulesSchema,
   childRules: z.array(z.object({ childId: alias, rules: priorityRulesSchema }).strict()).max(100),
+  resolvedChildren: z.array(reviewChildSchema).max(100).optional(),
   briefingOptions: briefingOptionsSchema,
   bootstrap: z.boolean(),
   changes: z.array(changeEventSchema).max(100000),
@@ -261,7 +268,17 @@ export const reviewResultSchema = z.object({
   health: z.array(healthSchema).max(10000),
   evidence: z.array(evidenceSchema).max(300000),
   notices: z.array(healthIssueSchema),
-}).strict();
+}).strict().superRefine((review, context) => {
+  if (!review.resolvedChildren) return;
+  const children = review.resolvedChildren.map(child => child.id);
+  const bindings = review.resolvedChildren.flatMap(child => child.bindings.map(binding => JSON.stringify(binding)));
+  if (new Set(children).size !== children.length || new Set(bindings).size !== bindings.length ||
+      JSON.stringify(children.slice().sort()) !== JSON.stringify(review.childRules.map(child => child.childId).sort()) ||
+      review.resolvedChildren.some(child => JSON.stringify(priorityRulesSchema.parse({ ...review.rules, ...child.rules })) !==
+        JSON.stringify(review.childRules.find(rule => rule.childId === child.id)?.rules))) {
+    context.addIssue({ code: "custom", message: "Inconsistent resolved student identities or priority rules." });
+  }
+});
 export type ReviewResult = z.infer<typeof reviewResultSchema>;
 
 export function childFor(config: ReviewConfig, source: Pick<ReviewEvidence, "portal" | "accountId" | "studentId">): string | null {
