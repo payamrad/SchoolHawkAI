@@ -64,6 +64,28 @@ export function messageDate(label: string, today: string): string {
   return value;
 }
 
+function snapshotMessageRows(elements: Element[]) {
+  const occurrences = new Map<string, number>();
+  return elements.slice(0, 100_001).map(element => {
+    const id = element.getAttribute("data-messageid") || "";
+    const identity = id ? `id:${id}` : `missing:${element.textContent ?? ""}`;
+    const occurrence = (occurrences.get(identity) ?? 0) + 1;
+    occurrences.set(identity, occurrence);
+    const hasReadState = element.classList.contains("messageCell--state-read");
+    const hasUnreadState = element.classList.contains("messageCell--state-unread");
+    return {
+      key: `${occurrence}:${identity}`, id,
+      sender: element.querySelector(".messageCell__from")?.textContent?.trim() || "",
+      subject: element.querySelector(".messageCell__subject")?.textContent?.trim() || "",
+      subjectCount: element.querySelectorAll(".messageCell__subject").length,
+      date: element.querySelector(".messageCell__date")?.textContent?.trim() || "",
+      unread: hasReadState === hasUnreadState ? null : hasUnreadState,
+      hasReadState, hasUnreadState,
+      stateMarkers: [...element.classList].filter(value => value.startsWith("messageCell--state-")).length,
+    };
+  });
+}
+
 export async function collectMessages(page: Page, days: number, now = new Date(), timeout = 15_000, options: { includeRead?: boolean } = {}): Promise<MessageRun> {
   const startedAt = Date.now();
   const result: MessageRun = {
@@ -116,24 +138,7 @@ export async function collectMessages(page: Page, days: number, now = new Date()
       batches = batch + 1;
       if (!await verifyInbox()) return finish();
       stage = "LIST_EXTRACTION_FAILED";
-      const rows = await page.locator(ROWS).evaluateAll(elements => {
-        const occurrences = new Map<string, number>();
-        return elements.slice(0, 100_001).map(element => {
-          const id = element.getAttribute("data-messageid") || "";
-          const identity = id ? `id:${id}` : `missing:${element.textContent ?? ""}`;
-          const occurrence = (occurrences.get(identity) ?? 0) + 1;
-          occurrences.set(identity, occurrence);
-          const states = [...element.classList].filter(value => value.startsWith("messageCell--state-"));
-          return {
-            key: `${occurrence}:${identity}`, id,
-            sender: element.querySelector(".messageCell__from")?.textContent?.trim() || "",
-            subject: element.querySelector(".messageCell__subject")?.textContent?.trim() || "",
-            date: element.querySelector(".messageCell__date")?.textContent?.trim() || "",
-            unread: states.length !== 1 ? null : states[0] === "messageCell--state-unread" ? true :
-              states[0] === "messageCell--state-read" ? false : null,
-          };
-        });
-      });
+      const rows = await page.locator(ROWS).evaluateAll(snapshotMessageRows);
       const idCounts = new Map<string, number>();
       for (const row of rows) if (row.id) idCounts.set(row.id, (idCounts.get(row.id) ?? 0) + 1);
       const scannedBefore = result.scannedCount;
@@ -167,6 +172,7 @@ export async function collectMessages(page: Page, days: number, now = new Date()
         previousDate = sentDate;
         if (sentDate < result.window.startDate) {
           crossedBoundary = true;
+          continue;
         }
         const parsed = rowSchema.safeParse({ ...row, displayedDate: row.date });
         if (!parsed.success) {
@@ -181,28 +187,22 @@ export async function collectMessages(page: Page, days: number, now = new Date()
           continue;
         }
         if (row.unread === null) {
-          warn("STATE_UNKNOWN", { code: "STATE_UNKNOWN", ...location, field: "unread" });
+          warn("STATE_UNKNOWN", { code: "STATE_UNKNOWN", ...location, field: "unread",
+            counts: { stateMarkers: row.stateMarkers },
+            flags: { hasReadState: row.hasReadState, hasUnreadState: row.hasUnreadState } });
           continue;
         }
-        if (sentDate < result.window.startDate) continue;
         if (!options.includeRead && !row.unread) continue;
         if (!await verifyInbox()) return finish();
         try {
           const cell = page.locator(ROWS);
-          const target = await cell.evaluateAll((elements, expected) => {
-            const matches = elements.map((element, index) => ({ element, index }))
-              .filter(({ element }) => element.getAttribute("data-messageid") === expected.id);
-            if (matches.length !== 1) return -1;
-            const { element, index } = matches[0];
-            const states = [...element.classList].filter(value => value.startsWith("messageCell--state-"));
-            return element.querySelectorAll(".messageCell__subject").length === 1 &&
-              element.querySelector(".messageCell__subject")?.textContent?.trim() === expected.subject &&
-              element.querySelector(".messageCell__from")?.textContent?.trim() === expected.sender &&
-              element.querySelector(".messageCell__date")?.textContent?.trim() === expected.date &&
-              states.length === 1 && states[0] === (expected.unread ? "messageCell--state-unread" : "messageCell--state-read") ? index : -1;
-          }, row);
-          if (target < 0) throw new Error();
-          await cell.nth(target).locator(".messageCell__subject").click({ timeout });
+          const matches = (await cell.evaluateAll(snapshotMessageRows)).map((value, index) => ({ value, index }))
+            .filter(({ value }) => value.id === row.id);
+          if (matches.length !== 1) throw new Error();
+          const { value, index } = matches[0];
+          if (value.subjectCount !== 1 || value.subject !== row.subject || value.sender !== row.sender ||
+              value.date !== row.date || value.unread !== row.unread) throw new Error();
+          await cell.nth(index).locator(".messageCell__subject").click({ timeout });
           await page.waitForFunction(id => {
             const records = document.querySelectorAll(".detailsPanel__myMessages .currentRecordContent[data-primaryid]");
             return records.length === 1 && records[0].getAttribute("data-primaryid") === id && records[0].querySelectorAll(".myMessageContent").length === 1;

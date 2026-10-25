@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { briefingInputSchema } from "@schoolhawk/briefing";
@@ -24,6 +24,74 @@ test("Review argument validation is strict and help creates no logs or database"
     }
     assert.equal(parseReviewArgs(["run", "--config", "a"]).command, "run");
     assert.match(cliFailureMessage(new ReviewUsageError("Use Review --help."), ["Review"]), /REVIEW: Use Review/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("missing review configuration gives setup guidance and preserves ENOENT diagnostics before database access", async context => {
+  const root = mkdtempSync(path.join(tmpdir(), "schoolhawk-review-config-"));
+  context.mock.method(console, "error", () => {});
+  try {
+    for (const command of ["run", "briefing"]) {
+      const args = ["Review", command, "--config", "PRIVATE_MISSING_CONFIG.json"];
+      await assert.rejects(() => runCli(args, root), error => {
+        assert(error instanceof ReviewUsageError);
+        assert.equal(error.code, "ENOENT");
+        const message = cliFailureMessage(error, args);
+        assert.match(message, /^REVIEW: Review configuration file not found/);
+        assert.match(message, /install -m 600 config\/review\.example\.json config\/review\.local\.json/);
+        assert.match(message, /edit its account aliases and student bindings/);
+        assert.match(message, /No database was opened/);
+        assert.doesNotMatch(message, /CLI command failed|PRIVATE_MISSING_CONFIG/);
+        return true;
+      });
+    }
+    assert.equal(existsSync(path.join(root, "data")), false);
+    assert.equal(existsSync(path.join(root, "playwright")), false);
+    assert.equal(existsSync(path.join(root, "PRIVATE_MISSING_CONFIG.json")), false);
+    for (const file of readdirSync(path.join(root, "logs"))) {
+      const log = readFileSync(path.join(root, "logs", file), "utf8");
+      const events = log.trim().split("\n").map(line => JSON.parse(line));
+      const failure = events.at(-1);
+      assert.equal(failure.code, "COMMAND_FAILED");
+      assert.equal(failure.stage, "CONFIGURATION");
+      assert.equal(failure.errorType, "missing-file");
+      assert.equal(failure.errorCode, "ENOENT");
+      assert.doesNotMatch(log, /PRIVATE_MISSING_CONFIG/);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("invalid review configuration paths and contents are diagnosed without modifying files or opening storage", async context => {
+  const root = mkdtempSync(path.join(tmpdir(), "schoolhawk-review-config-"));
+  context.mock.method(console, "error", () => {});
+  const target = path.join(root, "preserved.json");
+  writeFileSync(target, JSON.stringify(config()), { mode: 0o600 });
+  try {
+    for (const problem of ["permissions", "symlink", "directory", "oversized", "json", "schema"]) {
+      const file = path.join(root, `${problem}.json`);
+      if (problem === "symlink") symlinkSync(target, file);
+      else if (problem === "directory") mkdirSync(file, { mode: 0o700 });
+      else {
+        writeFileSync(file, problem === "oversized" ? "x".repeat(100001) : problem === "json" ? '{"PRIVATE_CONFIG_BODY":' :
+          problem === "schema" ? '{"version":1,"PRIVATE_CONFIG_BODY":"not valid"}' : JSON.stringify(config()), { mode: 0o600 });
+        if (problem === "permissions") chmodSync(file, 0o644);
+      }
+      await assert.rejects(() => runCli(["Review", "run", "--config", file], root), error => {
+        assert(error instanceof ReviewUsageError, problem);
+        assert.match(error.message, /No database was opened/);
+        assert.match(error.message, problem === "oversized" ? /exceeds 100 KB/ :
+          ["json", "schema"].includes(problem) ? /Invalid review configuration/ : /private, readable regular file/);
+        assert.doesNotMatch(error.message, /PRIVATE_CONFIG_BODY/);
+        return true;
+      });
+    }
+    assert.equal(existsSync(path.join(root, "data")), false);
+    assert.equal(existsSync(path.join(root, "playwright")), false);
+    assert.equal(readFileSync(target, "utf8"), JSON.stringify(config()));
+    const events = readdirSync(path.join(root, "logs")).flatMap(file =>
+      readFileSync(path.join(root, "logs", file), "utf8").trim().split("\n").map(line => JSON.parse(line)));
+    assert.equal(events.filter(event => event.code === "SCHEMA_INVALID" && event.stage === "CONFIGURATION").length, 2);
+    assert.doesNotMatch(JSON.stringify(events), /PRIVATE_CONFIG_BODY/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

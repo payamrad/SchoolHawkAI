@@ -187,6 +187,54 @@ test("returns a scoped empty success when all in-range messages are read and the
   } finally { await page.close(); }
 });
 
+test("unrelated message presentation states do not override explicit read/unread markers", async () => {
+  const page = await browser.newPage();
+  try {
+    await page.route("**/*", route => route.fulfill({ contentType: "text/html",
+      body: fixture(["12/09/2026", "11/09/2026", "06/09/2026"], [0]) }));
+    for (const includeRead of [false, true]) {
+      await page.goto(portalConfig.portals.skyward.urls.messages.inbox);
+      await page.locator(".messageCell").evaluateAll(elements => {
+        elements[0].classList.add("messageCell--state-selected");
+        elements[1].classList.add("messageCell--state-highlighted");
+      });
+      const events: DiagnosticEvent[] = [];
+      const result = await withDiagnosticSink(event => events.push(event),
+        () => collectMessages(page, 7, now, 500, { includeRead }));
+      assert.equal(result.status, "complete");
+      assert.deepEqual(result.messages.map(message => message.id), includeRead ? ["0", "1"] : ["1"]);
+      assert.deepEqual(result.messages.map(message => message.unreadBeforeOpen), includeRead ? [false, true] : [true]);
+      assert(events.every(event => event.code !== "STATE_UNKNOWN"));
+    }
+  } finally { await page.close(); }
+});
+
+test("out-of-window record fields cannot make verified in-window messages incomplete", async () => {
+  const page = await browser.newPage();
+  try {
+    await page.route("**/*", route => route.fulfill({ contentType: "text/html",
+      body: fixture(["12/09/2026", "06/09/2026", "05/09/2026"]) }));
+    for (const includeRead of [false, true]) {
+      await page.goto(portalConfig.portals.skyward.urls.messages.inbox);
+      await page.locator(".messageCell").evaluateAll(elements => {
+        elements[1].setAttribute("class", "messageCell messageCell--state-PRIVATE_UNKNOWN");
+        elements[1].querySelector(".messageCell__subject")!.textContent = "";
+        elements[2].setAttribute("class", "messageCell");
+        elements[2].removeAttribute("data-messageid");
+        elements[2].querySelector(".messageCell__from")!.textContent = "";
+      });
+      const events: DiagnosticEvent[] = [];
+      const result = await withDiagnosticSink(event => events.push(event),
+        () => collectMessages(page, 7, now, 500, { includeRead }));
+      assert.equal(result.status, "complete");
+      assert.deepEqual(result.messages.map(message => message.id), ["0"]);
+      assert.equal(result.scannedCount, 3);
+      assert.equal(await page.locator('[data-opened="yes"]').count(), 1);
+      assert(events.every(event => event.code !== "STATE_UNKNOWN" && event.code !== "RECORD_INVALID"));
+    }
+  } finally { await page.close(); }
+});
+
 test("collects matching days and bodies, excludes older items, and encrypts the run", async () => {
   const page = await browser.newPage();
   try {
@@ -312,6 +360,12 @@ test("row, unread-state and body errors skip only the affected message", async (
       assert.equal(await page.locator('[data-messageid="3"]').getAttribute("data-opened"), null);
       assert(events.some(event => event.record === 2 && event.page === 1 &&
         event.code === (issue.endsWith("-body") ? "MESSAGE_BODY_UNVERIFIED" : issue.endsWith("-state") ? "STATE_UNKNOWN" : "RECORD_INVALID")));
+      if (issue.endsWith("-state")) {
+        const diagnostic = events.find(event => event.record === 2 && event.code === "STATE_UNKNOWN")!;
+        assert.equal(diagnostic.flags?.hasReadState, issue === "ambiguous-state");
+        assert.equal(diagnostic.flags?.hasUnreadState, issue === "ambiguous-state");
+        assert.equal(diagnostic.counts?.stateMarkers, issue === "ambiguous-state" ? 2 : issue === "absent-state" ? 0 : 1);
+      }
       assert.equal(events[0].code, "RUN_STARTED");
       assert.equal(events.at(-1)?.code, "RUN_SUMMARY");
       assert.equal(events.at(-1)?.status, "partial");

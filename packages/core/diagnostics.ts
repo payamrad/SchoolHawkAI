@@ -51,6 +51,7 @@ export const diagnosticEventSchema = z.object({
     students: count.optional(), requestStudents: count.optional(), rowStudents: count.optional(),
     rosterMatches: count.optional(), courses: count.optional(), periods: count.optional(), headers: count.optional(),
     cells: count.optional(), pages: count.optional(), requests: count.optional(), suppressed: count.optional(),
+    identityCandidates: count.optional(), stateMarkers: count.optional(),
   }).optional(),
   flags: z.object({
     verifiedEmpty: z.boolean().optional(), headerMatch: z.boolean().optional(), capped: z.boolean().optional(),
@@ -58,6 +59,7 @@ export const diagnosticEventSchema = z.object({
     hasDate: z.boolean().optional(), hasMark: z.boolean().optional(), hasLink: z.boolean().optional(),
     hasStudent: z.boolean().optional(), discoveryComplete: z.boolean().optional(), matched: z.boolean().optional(),
     conflicted: z.boolean().optional(),
+    hasReadState: z.boolean().optional(), hasUnreadState: z.boolean().optional(),
   }).optional(),
 });
 

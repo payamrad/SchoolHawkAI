@@ -1,0 +1,19 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "SchoolHawk: verify collector fixes",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"run",
+				"pipeline",
+				"--",
+				"--phase",
+				"collection"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		}
+	]
+}

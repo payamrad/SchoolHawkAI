@@ -72,6 +72,130 @@ Login requires locally supplied credentials. See
 [apps/collector/README.md](apps/collector/README.md) for login and collection details.
 Tests use synthetic data and do not contact school portals.
 
+## Run the Pipeline by Phase
+
+[scripts/run-pipeline.sh](scripts/run-pipeline.sh) runs the existing npm commands
+in order: login, collection, deterministic change detection, and local reporting. Login
+is required whenever collection is selected. It reads
+account aliases and enabled sections from the same private review configuration;
+there is no second list of hardcoded accounts.
+
+```bash
+# Preview everything without opening browsers or a database.
+bash scripts/run-pipeline.sh --dry-run
+
+# Run the full pipeline, starting with fresh portal logins.
+bash scripts/run-pipeline.sh --phase all
+
+# Login only, or explicitly log in before a local-only reporting run.
+bash scripts/run-pipeline.sh --phase login
+bash scripts/run-pipeline.sh --phase reporting --login
+
+# Select phases independently or combine them (execution order stays fixed).
+bash scripts/run-pipeline.sh --phase login,collection --days 14
+bash scripts/run-pipeline.sh --phase collection --days 14
+bash scripts/run-pipeline.sh --phase change-detection
+bash scripts/run-pipeline.sh --phase reporting --format text
+bash scripts/run-pipeline.sh --phase change-detection,reporting --format json
+
+# Root npm shortcut; "review" is an alias for "change-detection".
+npm run pipeline -- --phase review,reporting
+bash scripts/run-pipeline.sh --help
+```
+
+Options:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--phase` | `all` | `login`, `collection`, `change-detection` (or `review`), `reporting`, or a comma-separated combination; every collection run logs in first |
+| `--login` | Automatic for collection | Explicitly prepend login to local-only phases; accepted but redundant for `all`/`collection` |
+| `--config` | `config/review.local.json` | Existing private review configuration; relative paths are repository-root-relative |
+| `--days` | `7` | Inclusive 1–366 day Skyward message/past-assignment window |
+| `--messages` | `unread` | Preserve the collector default, or use `all` to include read messages within the window |
+| `--format` | `text` | Deterministic text summary or bounded briefing `json` |
+| `--dry-run` | Off | Validate configuration and display exact commands without running them |
+
+Collection runs configured Skyward assignments, grades, messages, and Canvas
+assignments sequentially. The day count does not restrict upcoming/missing work,
+grade snapshots, or Canvas full active-course snapshots. To include messages already
+read manually or opened during an earlier failed collection, explicitly use:
+
+```bash
+bash scripts/run-pipeline.sh --phase all --days 14 --messages all
+```
+
+**Both message modes open records and may mark messages read or send receipts.**
+Use only approved accounts/workflows. The runner does not initialize storage,
+guess student mappings, or approve assignment links. Set up the database and private
+configuration first. **The default run, `--phase all`, and `--phase collection`
+always log in first**, even if saved session files already exist. A successful
+login is required before that portal's collectors can run. Local-only
+change-detection/reporting does not access a portal unless `--login` or a `login`
+phase is explicitly requested.
+
+Login calls `npm run skyward:login` and/or `npm run canvas:login` once for the portals
+in your configuration. **No preparatory `read` or `export` commands are needed for
+interactive use:**
+
+```bash
+npm run pipeline -- --phase all
+```
+
+The runner reuses any exported credentials and prompts on your terminal for missing
+usernames/passwords. Password input is hidden, including when Bash tracing is enabled.
+Prompts use the controlling terminal, not piped stdin or the internal collection
+plan, so they also work when command output is redirected. Empty input or EOF skips
+that portal without making a login attempt; Ctrl-C stops the pipeline.
+
+The runner exports `SKYWARD_USERNAME`/`SKYWARD_PASSWORD` or
+`CANVAS_USERNAME`/`CANVAS_PASSWORD` only inside the matching login subprocess.
+Prompted credentials disappear when that process exits and are never saved to
+files, added to command arguments, or exported into your parent shell. Other portal
+credentials are excluded, as are all credentials from configuration preflight,
+collection, and local review/reporting.
+
+For unattended use, supply the credential variables through a protected environment
+as described in the [collector login instructions](apps/collector/README.md#skyward-login).
+Missing credentials without an interactive terminal fail explicitly rather than
+hanging or reading piped input. Help, dry-runs, and runs without a login phase never
+prompt. If you exported credentials yourself, unset them in your terminal afterward;
+the runner cannot erase the caller's environment. Environment variables are not
+encrypted storage. Do not put credentials in the review JSON or shell arguments.
+
+For Canvas manual browser login, set `CANVAS_HEADED=1` with both Canvas credential
+variables unset; the runner leaves credential entry to that browser without terminal
+prompts. For Skyward, `SKYWARD_HEADED=1` opens a visible browser; the runner supplies
+its credentials from the environment or terminal prompts. A local desktop/display is required for headed
+operation. The existing bounded login verification and MFA/CAPTCHA behavior are
+unchanged; the runner never bypasses challenges or retries credentials automatically.
+Failed login skips that portal's collections even if an old session file remains;
+the other portal and local review/reporting can still proceed.
+
+Keep the saved session matched to its account alias. Login and collection reject multiple
+aliases for the same portal because current session files are portal-wide; local
+review/reporting may still combine multiple previously collected accounts.
+
+`change-detection` calls `Review run`. `reporting` calls `Review briefing`, which
+also reevaluates local changes/priorities and saves an evaluation even when selected
+alone. It is the **current model-free summary or structured AI input**, not an Azure
+report, and it performs no email/SMS delivery.
+
+Independent login/collection failures do not prevent subsequent portals or review.
+Unsupported configured sections are reported explicitly and count as failures.
+The runner exits nonzero if any step fails; a failed change-detection step prevents
+reporting. Interruption stops the remaining steps. Earlier collection preflight
+failures may not have stored run-health records, so treat any resulting report as
+potentially stale even if its saved coverage looks complete.
+
+Progress/failure notices go to stderr; commands keep their normal npm output and
+diagnostic logs. Combined output is not a single JSON document, and reporting may
+contain private data. The runner does not create separate report files or schedule
+itself. Run only one pipeline/collection at a time; this script does not introduce
+the planned shared scheduling lock.
+
+Runner tests mock npm and use Python 3's standard-library pseudo-terminal support
+to verify interactive prompts, hidden passwords, and cancellation without real logins.
+
 ## Fault Tolerance and Local Diagnostics
 
 Collection is best-effort within the authorized scope. A malformed record or an
@@ -144,6 +268,10 @@ install -m 600 config/review.example.json config/review.local.json
 
 `config/review.local.json` is ignored by Git. The CLI rejects non-private files,
 symlinks, invalid configuration, duplicate sources, and conflicting child bindings.
+Database setup does not create this review configuration. A missing configuration
+stops `Review run` and `Review briefing` before database access and reports the copy
+command above; it is not a database/key failure. Copy the template only when the
+local configuration is missing, then edit it before reviewing real accounts.
 Never put credentials in this file. `children[].id` should be a local pseudonym;
 bindings explicitly associate that child with portal/account/student IDs. No names
 are used to infer identity. Missing bindings remain visible as `unmapped-student`.

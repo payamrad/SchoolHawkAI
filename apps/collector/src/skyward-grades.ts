@@ -197,8 +197,12 @@ export async function gradeSnapshot(page: Page, html: string) {
       termId: element.getAttribute("data-grade-bucket-id"),
     }));
     const rows = [...document.querySelectorAll('tr.browseRow[id*="_unlockedRow"]')].map(row => {
-      const course = row.querySelector(".studentGradesClassCell");
-      return { studentId: course?.getAttribute("data-studentid") ?? "", studentSectionId: course?.getAttribute("data-studentsectionid") ?? "",
+      const identitySelector = "[data-studentid][data-studentsectionid][data-coursedescription]";
+      const identities = [...row.querySelectorAll(identitySelector)];
+      if (row.matches(identitySelector)) identities.unshift(row);
+      const course = identities.length === 1 ? identities[0] : undefined;
+      return { identityCandidates: identities.length,
+        studentId: course?.getAttribute("data-studentid") ?? "", studentSectionId: course?.getAttribute("data-studentsectionid") ?? "",
         course: course?.getAttribute("data-coursedescription") ?? "", courseCode: course?.getAttribute("data-coursecode") || null,
         classDetails: course?.querySelector(".fivetoppadding")?.textContent?.replace(/\s+/g, " ").trim() || null,
         cells: [...row.children].map(cell => {
@@ -281,8 +285,10 @@ export function parseGradeSnapshot(student: Pick<GradeStudent, "id" | "name" | "
       const course = rowIndex + 1;
       try {
         if (row.studentId !== student.id) {
-          issue("STUDENT_UNVERIFIED", { code: "STUDENT_BINDING_CONFLICT", course, field: "student",
-            flags: { hasStudent: !!row.studentId, matched: false }, counts: { skipped: 1 } });
+          issue("STUDENT_UNVERIFIED", { code: row.identityCandidates > 1 ? "STUDENT_BINDING_AMBIGUOUS" :
+            row.studentId ? "STUDENT_BINDING_CONFLICT" : "STUDENT_BINDING_MISSING", course, field: "student",
+            flags: { hasStudent: !!row.studentId, hasId: !!row.studentSectionId, hasCourse: !!row.course, matched: false },
+            counts: { skipped: 1, identityCandidates: row.identityCandidates, cells: row.cells.length } });
           continue;
         }
         if (!/^\d{1,300}$/.test(row.studentSectionId) || !row.course.trim() || row.course.length > 1_000_000) {
@@ -463,8 +469,11 @@ export async function collectGrades(page: Page, now = new Date(), timeout = 15_0
         if (snapshot.rows.some(row => row.studentId !== id)) {
           run.discoveryComplete = false;
           unverifiedStudents.add(id);
-          report({ code: "STUDENT_BINDING_CONFLICT", student: expectedStudent, record: browse.ordinal, field: "student", counts,
-            flags: { matched: false, conflicted: true } });
+          const conflicted = snapshot.rows.some(row => row.studentId && row.studentId !== id);
+          const ambiguous = snapshot.rows.some(row => row.identityCandidates > 1);
+          report({ code: conflicted ? "STUDENT_BINDING_CONFLICT" : ambiguous ? "STUDENT_BINDING_AMBIGUOUS" : "STUDENT_BINDING_MISSING",
+            student: expectedStudent, record: browse.ordinal, field: "student", counts,
+            flags: { matched: false, conflicted: conflicted || ambiguous } });
         }
       } else {
         if (rowIds.size !== 1 || !roster.has([...rowIds][0])) {

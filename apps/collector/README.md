@@ -197,6 +197,18 @@ It never replaces Skyward grades or missing status with Canvas values. See the r
 
 ## Shared Collector Code
 
+To run the configured collectors followed by local review/reporting, use
+[`scripts/run-pipeline.sh`](../../scripts/run-pipeline.sh). Its
+[`--phase` options](../../README.md#run-the-pipeline-by-phase) support login-only,
+collection, or combined execution. The default/all run and any selected collection
+phase always run these existing portal login commands first. `--phase login` logs in
+without collecting; `--login` can also prepend login to local-only phases. The
+runner prompts for missing credentials with hidden
+password input and exports them only to the corresponding login process; existing
+exported credentials still work. Standalone login commands retain the environment
+requirements above. Canvas manual-browser login and manual challenge completion are
+unchanged; setup and mapping approval are never automatic.
+
 - `src/skyward.ts`: Skyward compatibility wrappers, timezone/date windows,
 	student names/IDs, and browse-registration parsing.
 - `src/portal-collection.ts`: portal-specific saved-session validation and shared
@@ -285,6 +297,13 @@ deduplicates by portal message ID, and scrolls as necessary until it crosses the
 requested date boundary. It stops after at most 50 batches. Unknown dates,
 out-of-order records, mismatched previews, or stalled pagination produce a
 failed/partial result and nonzero exit status, not an all-clear report.
+
+Read state requires an explicit read or unread marker; unrelated presentation
+state classes do not invalidate that marker. Missing or contradictory markers
+inside the requested date window still produce incomplete coverage. Older rows
+are used only to verify the date boundary/order, so their subject or read state
+cannot incorrectly make an otherwise complete requested window fail. Diagnostics
+record marker counts and read/unread-presence flags, never raw class names or text.
 
 There is not yet a verified end-of-inbox or explicit-empty selector. Consequently,
 a genuinely empty inbox, or a date range reaching beyond the oldest message,
@@ -420,6 +439,13 @@ fails closed. Course rows, period headings, grade-bucket IDs, row counts, and ro
 caps are checked. Empty results require a positively bound student and the
 explicit `noRecordsInBrowse` marker. Unsupported layouts, missing students, or
 incomplete matrices produce a nonzero exit status and retained failure coverage.
+
+Course identity is read from one unambiguous element carrying the portal's explicit
+student ID, student-section ID, and course description attributes. A noninteractive
+course label does not need the drilldown-link CSS class. Missing or conflicting
+identity attributes still fail closed; no student is inferred from a name or row
+position. Diagnostics distinguish missing, conflicting, and ambiguous bindings and
+include structural candidate/cell counts without recording names or grades.
 
 Each grade record contains:
 

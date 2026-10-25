@@ -2,7 +2,7 @@ import { lstatSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { ReviewError, reviewConfigSchema, reviewIdSchema, reviewTimestamp, type ReviewConfig } from "@schoolhawk/core/review";
-import { reportDiagnostic } from "@schoolhawk/core/diagnostics";
+import { diagnosticErrorCode, reportDiagnostic } from "@schoolhawk/core/diagnostics";
 import { buildBriefingInput, renderDeterministicBriefing, serializeBriefingInput } from "@schoolhawk/briefing";
 import { checkPrivatePath } from "@schoolhawk/storage/private-files";
 import { withReviewStore } from "@schoolhawk/storage/review-sqlite";
@@ -22,11 +22,50 @@ briefing also evaluates current time-based rules, then prints bounded provider-n
 JSON, or a deterministic local text summary with --text.
 Inspection commands read saved results; check evaluatedAt before treating them as current.
 Configuration must be a private regular file owned by the current user (0600).
+First-time setup, from the repository root (only when the local file is missing):
+  install -m 600 config/review.example.json config/review.local.json
+Then edit its account aliases and student bindings before running review.
 Explicit inspection can print private data; protect terminal output. Nothing is sent.
 Use a new profileId when changing source accounts/sections or child bindings.
 `;
 
-export class ReviewUsageError extends Error {}
+export class ReviewUsageError extends Error {
+  readonly code: ReturnType<typeof diagnosticErrorCode>;
+
+  constructor(message: string, cause?: unknown) {
+    super(message, { cause });
+    this.code = diagnosticErrorCode(cause);
+  }
+}
+
+export function readReviewConfig(file: string): ReviewConfig {
+  reportDiagnostic({ level: "info", code: "STAGE_STARTED", stage: "CONFIGURATION" });
+  let contents: string;
+  try {
+    checkPrivatePath(file);
+    if (lstatSync(file).size > 100000) throw new ReviewUsageError("Review configuration exceeds 100 KB. No database was opened.");
+    contents = readFileSync(file, "utf8");
+  } catch (error) {
+    if (error instanceof ReviewUsageError) throw error;
+    if (diagnosticErrorCode(error) === "ENOENT") {
+      throw new ReviewUsageError(
+        "Review configuration file not found at the --config path. Create a private copy of config/review.example.json, " +
+        "then edit its account aliases and student bindings. For the default path, run from the repository root: " +
+        "install -m 600 config/review.example.json config/review.local.json. No database was opened.", error);
+    }
+    throw new ReviewUsageError(
+      "Cannot read the review configuration at the --config path. It must be a private, readable regular file " +
+      "(not a symlink), owned by the current user with mode 0600. Check the configuration path and its permissions; " +
+      "do not replace the database key. No database was opened.", error);
+  }
+  try { return reviewConfigSchema.parse(JSON.parse(contents)); }
+  catch (error) {
+    reportDiagnostic({ level: "error", code: "SCHEMA_INVALID", stage: "CONFIGURATION", errorType: "validation" });
+    throw new ReviewUsageError(
+      "Invalid review configuration. Check its JSON syntax, schema, unique sources/child bindings, and rule limits. " +
+      "Values were withheld. No database was opened.", error);
+  }
+}
 
 export function parseReviewArgs(args: string[]) {
   if (args.length === 1 && args[0] === "--help") return { command: "help" as const };
@@ -69,14 +108,7 @@ export async function runReviewCli(args: string[], root: string): Promise<void> 
   if (input.command === "help") { console.log(HELP); return; }
   const { values } = input;
   if (!values) throw new ReviewUsageError("Invalid Review command.");
-  let config: ReviewConfig | undefined;
-  if (values.config) {
-    const file = path.resolve(root, values.config);
-    checkPrivatePath(file);
-    if (lstatSync(file).size > 100000) throw new ReviewUsageError("Review configuration exceeds 100 KB.");
-    try { config = reviewConfigSchema.parse(JSON.parse(readFileSync(file, "utf8"))); }
-    catch { throw new ReviewUsageError("Invalid review configuration. Check its schema, unique sources/child bindings, and rule limits. Values were withheld."); }
-  }
+  const config = values.config ? readReviewConfig(path.resolve(root, values.config)) : undefined;
   await withReviewStore(root, store => {
     reportDiagnostic({ level: "info", code: "STAGE_STARTED", stage: "CLI_COMMAND" });
     if (input.command === "run" || input.command === "briefing") {

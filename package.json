@@ -7,6 +7,7 @@
     "test": "npm run test --workspaces --if-present",
     "cli": "npm run cli --workspace @schoolhawk/cli --",
     "data": "npm run data --workspace @schoolhawk/cli --",
+    "pipeline": "bash scripts/run-pipeline.sh",
     "skyward:login": "npm run skyward:login --workspace @schoolhawk/collector",
     "canvas:login": "npm run canvas:login --workspace @schoolhawk/collector",
     "canvas:assignments": "npm run canvas:assignments --workspace @schoolhawk/collector --",

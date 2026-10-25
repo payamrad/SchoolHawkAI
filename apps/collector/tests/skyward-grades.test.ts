@@ -16,6 +16,7 @@ const home = "https://www.q.wa-k12.net/lkwash/Home";
 const now = new Date("2026-09-27T12:00:00.000Z");
 type Options = { empty?: boolean; missingResponse?: boolean; wrongStudent?: boolean; truncated?: boolean; capped?: boolean;
   missingEmptyMarker?: boolean; duplicateBucket?: boolean; headerChanged?: boolean; rowMismatch?: boolean; missingNames?: boolean;
+  nonInteractiveCourse?: boolean; conflictingCourseIdentity?: boolean;
   extraBrowses?: ("unbound" | "ambiguous" | "conflict" | "duplicate" | "same-scope")[];
   responseError?: "json" | "payload" | "registration" | "http" };
 
@@ -41,9 +42,12 @@ async function fixture(page: Page, options: Options = {}) {
       const headers = [options.headerChanged ? "Changed header" : "Class", "Missing Assignments", "T1", "T2"]
         .map((label, index) => `<th data-column-index="${index}"><div class="headerTextContainerDiv">${label}</div></th>`).join("");
       const id = extra && extra !== "same-scope" ? `StudentGrades-${900 + request.index}` : `StudentGrades-${student}00`;
-      const rows = empty ? "" : `<tr class="browseRow" id="${id}_unlockedRow0"><td data-column="0"><a class="studentGradesClassCell"
+      const courseTag = options.nonInteractiveCourse ? "span" : "a";
+      const courseClass = options.nonInteractiveCourse ? "studentGradesCourseLabel" : "studentGradesClassCell";
+      const rows = empty ? "" : `<tr class="browseRow" id="${id}_unlockedRow0"><td data-column="0"><${courseTag} class="${courseClass}"
         data-studentid="${extra === "conflict" || options.wrongStudent && student === "2" ? "1" : student}" data-studentsectionid="10${student}"
-        data-coursedescription="Synthetic course" data-coursecode="SYNTH"><div class="fivetoppadding">Synthetic class details</div></a></td>
+        data-coursedescription="Synthetic course" data-coursecode="SYNTH"><div class="fivetoppadding">Synthetic class details</div></${courseTag}>
+        ${options.conflictingCourseIdentity && student === "2" ? '<span data-studentid="1" data-studentsectionid="999" data-coursedescription="Conflicting course"></span>' : ""}</td>
         <td data-column="1"></td><td data-column="2" data-student-grade-bucket-id="1001"><a class="progressReportBreakdownGradeMarkCode progressReportDetailOpenGrade"><span class="anchorText">${extra === "duplicate" || extra === "same-scope" ? "Synthetic changed mark" : student === "1" ? "A" : "0"}</span></a></td>
         ${options.rowMismatch ? "" : `<td data-column="2" data-student-grade-bucket-id="${options.duplicateBucket ? "1001" : "1002"}"><a class="progressReportBreakdownGradeMarkCode progressReportDetailClosedGrade"><svg></svg></a></td>`}</tr>`;
       const html = `<div class="browse" id="${id}"><table><thead><tr class="unlockedHeaderTableRow">${headers}</tr></thead><tbody>${rows}</tbody></table>
@@ -69,7 +73,7 @@ function syntheticSnapshot(): Awaited<ReturnType<typeof gradeSnapshot>> {
   const blank = { span: 1, bucketId: null, text: "", hasLink: false, mark: "", unrecognizedMark: false, periodStatus: "unknown" as const };
   return {
     headers: ["Class", "Missing Assignments", "T1", "T2", "T3"].map(label => ({ label, span: 1, termId: null })),
-    rows: [{ studentId: "1", studentSectionId: "101", course: "Synthetic course", courseCode: "SYNTH", classDetails: null,
+    rows: [{ identityCandidates: 1, studentId: "1", studentSectionId: "101", course: "Synthetic course", courseCode: "SYNTH", classDetails: null,
       cells: [blank, blank, ...["1101", "1102", "1103"].map(bucketId => ({ ...blank, bucketId, text: "A", mark: "A",
         hasLink: true, periodStatus: "open" as const }))] }],
     emptyMarkers: 0,
@@ -138,6 +142,28 @@ test("missing, truncated, inconsistent, and cross-student grade results cannot c
       assert.notEqual(run.status, "complete");
       assert(run.students.some(student => student.status !== "complete") || !run.discoveryComplete);
     }
+  } finally { await page.close(); }
+});
+
+test("noninteractive grade course labels retain explicit identity without requiring a drilldown CSS class", async () => {
+  const page = await browser.newPage();
+  try {
+    await fixture(page, { nonInteractiveCourse: true });
+    const run = await collectGrades(page, now, 500);
+    assert.equal(run.status, "complete");
+    assert.equal(run.discoveryComplete, true);
+    assert.deepEqual(run.students.map(student => student.grades.map(grade => grade.grade)), [["A", null], ["0", null]]);
+    await page.unroute("**/*");
+    await fixture(page, { nonInteractiveCourse: true, wrongStudent: true });
+    const crossStudent = await collectGrades(page, now, 500);
+    assert.equal(crossStudent.status, "partial");
+    assert.equal(crossStudent.students[1].grades.length, 0);
+    await page.unroute("**/*");
+    await fixture(page, { nonInteractiveCourse: true, conflictingCourseIdentity: true });
+    const conflicting = await collectGrades(page, now, 500);
+    assert.equal(conflicting.status, "partial");
+    assert.equal(conflicting.students[0].status, "complete");
+    assert.equal(conflicting.students[1].grades.length, 0);
   } finally { await page.close(); }
 });
 
