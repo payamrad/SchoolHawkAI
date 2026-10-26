@@ -10,10 +10,15 @@ import { prioritizeReview, type ConfirmedReviewLink } from "@schoolhawk/core/pri
 import { resolveReviewStudents } from "@schoolhawk/core/student-identity";
 import { buildStudentSnapshot, studentSnapshotOptionsSchema,
   type SnapshotHistoryRun, type SnapshotLinks, type StudentSnapshot, type StudentSnapshotOptions } from "@schoolhawk/core/student-snapshot";
-import { reportDiagnostic } from "@schoolhawk/core/diagnostics";
+import { DiagnosticLogError, diagnosticErrorCode, diagnosticErrorType, reportDiagnostic } from "@schoolhawk/core/diagnostics";
+import {
+  agentReportIdSchema, agentReportSummarySchema, storedAgentReportSchema, studentReportAnalysisSchema,
+  type AgentReportSummary, type StoredAgentReport,
+} from "@schoolhawk/core/agent-reports";
 import { SqliteCanvasStore, withWorkspaceDatabase } from "./sqlite-canvas-store";
 import { checkAccount, checkLimit } from "./sqlite-message-store";
 import type { ReviewStore } from "./review";
+import { AgentReportStorageError, type AgentReportStore } from "./agent-reports";
 
 const storedPayload = z.object({ payload: z.instanceof(Buffer) });
 const runReference = z.object({
@@ -28,7 +33,73 @@ export async function withReviewStore<Result>(root: string, operation: (store: S
   });
 }
 
-export class SqliteReviewStore extends SqliteCanvasStore implements ReviewStore {
+export class SqliteReviewStore extends SqliteCanvasStore implements ReviewStore, AgentReportStore {
+  saveAgentReport(input: unknown, now = new Date()): StoredAgentReport {
+    reportDiagnostic({ level: "info", code: "STAGE_STARTED", stage: "DATABASE_WRITE", section: "storage" });
+    const parsed = studentReportAnalysisSchema.safeParse(input);
+    if (!parsed.success) {
+      reportDiagnostic({ level: "error", code: "SCHEMA_INVALID", stage: "DATABASE_WRITE", section: "storage", errorType: "validation" });
+      throw new AgentReportStorageError("The AI analysis is not a valid report response. Nothing was saved.");
+    }
+    const analysis = parsed.data;
+    const reportId = `report_${this.hash(JSON.stringify(["agent-report-v1", analysis.provider, analysis.responseId]))}`;
+    try {
+      const report = this.database.transaction(() => {
+        const existing = this.getAgentReport(reportId);
+        if (existing) {
+          const { version: _version, reportId: _reportId, savedAt: _savedAt, ...previous } = existing;
+          if (JSON.stringify(previous) !== JSON.stringify(analysis)) {
+            throw new AgentReportStorageError("An AI response with this provider/response ID was already saved with different contents. The existing report was preserved.");
+          }
+          return existing;
+        }
+        const saved = storedAgentReportSchema.parse({ ...analysis, version: 1, reportId, savedAt: now.toISOString() });
+        this.database.prepare("INSERT INTO agent_reports VALUES (?, ?, ?, ?, ?, ?)").run(
+          saved.reportId, saved.provider, saved.receivedAt, saved.savedAt, saved.studentRefs.length,
+          this.seal(saved, JSON.stringify(["agent-report", saved.reportId])),
+        );
+        const persisted = this.getAgentReport(saved.reportId);
+        if (!persisted) throw new AgentReportStorageError("The AI report was not available after its database insert.");
+        return persisted;
+      }).immediate();
+      reportDiagnostic({ level: "info", code: "AGENT_REPORT_SAVED", stage: "DATABASE_WRITE", section: "storage",
+        status: "success", counts: { accepted: 1, students: report.studentRefs.length } });
+      return report;
+    } catch (error) {
+      if (error instanceof DiagnosticLogError) throw error;
+      reportDiagnostic({ level: "error", code: "STORAGE_WRITE_FAILED", stage: "DATABASE_WRITE", section: "storage",
+        errorType: diagnosticErrorType(error), errorCode: diagnosticErrorCode(error) });
+      if (error instanceof AgentReportStorageError) throw error;
+      throw new AgentReportStorageError("The AI response could not be saved locally. Check the database, original key, permissions, and disk space. No saved-report result was returned.", error);
+    }
+  }
+
+  getAgentReport(reportId: string): StoredAgentReport | undefined {
+    if (!agentReportIdSchema.safeParse(reportId).success) throw new AgentReportStorageError("Invalid saved AI report ID.");
+    const row = this.database.prepare(`SELECT report_id AS reportId, provider, received_at AS receivedAt,
+      saved_at AS savedAt, student_count AS studentCount, payload FROM agent_reports WHERE report_id = ?`).get(reportId);
+    if (!row) return undefined;
+    const value = agentReportSummarySchema.extend({ payload: z.instanceof(Buffer) }).parse(row);
+    const report = storedAgentReportSchema.parse(this.unseal(value.payload, JSON.stringify(["agent-report", reportId])));
+    const expectedId = `report_${this.hash(JSON.stringify(["agent-report-v1", report.provider, report.responseId]))}`;
+    if (report.reportId !== reportId || expectedId !== reportId || report.provider !== value.provider ||
+        report.receivedAt !== value.receivedAt || report.savedAt !== value.savedAt || report.studentRefs.length !== value.studentCount) {
+      throw new AgentReportStorageError("Saved AI report metadata does not match its protected contents.");
+    }
+    return report;
+  }
+
+  listAgentReports(options: { limit?: number; offset?: number } = {}): AgentReportSummary[] {
+    const limit = options.limit ?? 100;
+    const offset = options.offset ?? 0;
+    checkLimit(limit);
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new AgentReportStorageError("Invalid AI report query offset.");
+    return this.database.prepare(`SELECT report_id AS reportId, provider, received_at AS receivedAt,
+      saved_at AS savedAt, student_count AS studentCount FROM agent_reports
+      ORDER BY received_at DESC, report_id DESC LIMIT ? OFFSET ?`).all(limit, offset)
+      .map(row => agentReportSummarySchema.parse(row));
+  }
+
   private reviewIds(config: ReviewConfig): ReviewIdFactory {
     return (kind, parts) => `${kind}_${this.hash(JSON.stringify(["review-v1", config.profileId, kind, parts]))}`;
   }

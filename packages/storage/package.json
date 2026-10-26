@@ -13,7 +13,8 @@
     "./private-files": "./private-files.ts",
     "./diagnostics": "./diagnostics.ts",
     "./review": "./review.ts",
-    "./review-sqlite": "./sqlite-review-store.ts"
+    "./review-sqlite": "./sqlite-review-store.ts",
+    "./agent-reports": "./agent-reports.ts"
   },
   "scripts": { "test": "vitest run" },
   "dependencies": {

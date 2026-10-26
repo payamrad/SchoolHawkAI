@@ -25,7 +25,7 @@ export const diagnosticEventSchema = z.object({
     "SCROLL_COMPLETENESS_UNVERIFIED", "SCHEMA_INVALID", "REQUEST_FAILED", "PERMISSION_DENIED",
     "RATE_LIMITED", "HTTP_ERROR", "RESPONSE_INVALID", "IMPORT_REJECTED", "IMPORT_SUMMARY",
     "STORAGE_KEY_INVALID", "STORAGE_SCHEMA_UNSUPPORTED", "STORAGE_OPEN_FAILED", "REVIEW_SUMMARY", "BRIEFING_SUMMARY", "SNAPSHOT_SUMMARY",
-    "AGENT_TEST_SUMMARY", "AGENT_ANALYSIS_SUMMARY",
+    "AGENT_TEST_SUMMARY", "AGENT_ANALYSIS_SUMMARY", "AGENT_REPORT_SAVED",
   ]),
   portal: z.enum(["skyward", "canvas"]).optional(),
   section: z.enum(["session", "students", "courses", "assignments", "grades", "messages", "upcoming",

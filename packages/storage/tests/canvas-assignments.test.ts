@@ -245,7 +245,7 @@ test("Canvas migration, audits, and encrypted backups preserve data and roll bac
     new SqliteCanvasStore(file, key).close();
     const legacy = new Database(file);
     try {
-      legacy.exec("DROP TABLE review_evaluations; DROP TABLE review_events; DROP TABLE review_profiles;");
+      legacy.exec("DROP TABLE agent_reports; DROP TABLE review_evaluations; DROP TABLE review_events; DROP TABLE review_profiles;");
       legacy.exec("DROP TRIGGER skyward_assignment_identity; DROP TABLE canvas_match_runs; DROP TABLE skyward_assignments; DROP TABLE canvas_assignments;");
       legacy.exec("DROP TABLE canvas_audit_events; DROP TABLE canvas_assignment_links; DROP TABLE canvas_course_mappings; DROP TABLE canvas_assignment_observations; DROP TABLE canvas_assignment_courses; DROP TABLE canvas_assignment_runs; PRAGMA user_version = 4;");
       assert.throws(() => new SqliteCanvasStore(file, randomBytes(32)), /Incorrect storage key/);
@@ -254,7 +254,7 @@ test("Canvas migration, audits, and encrypted backups preserve data and roll bac
     const store = new SqliteCanvasStore(file, key);
     const connection = new Database(file);
     try {
-      assert.equal(connection.pragma("user_version", { simple: true }), 7);
+      assert.equal(connection.pragma("user_version", { simple: true }), 8);
       const canvas = sample();
       const skyward = skywardSample();
       store.importAssignmentRun("skyward-parent", skyward);
@@ -541,7 +541,7 @@ test("version-5 identities and confirmed links backfill without altering snapsho
     const oldSkyward = legacy.prepare("SELECT content_hash, payload FROM assignment_runs").all();
     const oldCanvas = legacy.prepare("SELECT content_hash, payload FROM canvas_assignment_runs").all();
     try {
-      legacy.exec("DROP TABLE review_evaluations; DROP TABLE review_events; DROP TABLE review_profiles;");
+      legacy.exec("DROP TABLE agent_reports; DROP TABLE review_evaluations; DROP TABLE review_events; DROP TABLE review_profiles;");
       legacy.exec(`DROP TRIGGER skyward_assignment_identity; DROP TRIGGER canvas_assignment_identity;
         DROP TRIGGER canvas_link_requires_identity; DROP TRIGGER canvas_link_status;
         DROP TABLE canvas_match_runs; DROP TABLE skyward_assignments; DROP TABLE canvas_assignments;
@@ -554,7 +554,7 @@ test("version-5 identities and confirmed links backfill without altering snapsho
     const connection = new Database(file);
     try {
       connection.pragma("foreign_keys = ON");
-      assert.equal(connection.pragma("user_version", { simple: true }), 7);
+      assert.equal(connection.pragma("user_version", { simple: true }), 8);
       assert.deepEqual(connection.prepare("SELECT content_hash, payload FROM assignment_runs").all(), oldSkyward);
       assert.deepEqual(connection.prepare("SELECT content_hash, payload FROM canvas_assignment_runs").all(), oldCanvas);
       assert.deepEqual(store.listCanvasAssignmentLinks("canvas-parent"), [existingLink]);

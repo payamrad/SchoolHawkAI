@@ -116,7 +116,7 @@ test("migrates existing records from version 1 and rolls back a failed cleanup a
     try { initial.importRun("parent", run); } finally { initial.close(); }
     const legacy = new Database(file);
     try {
-      legacy.exec("DROP TABLE review_evaluations; DROP TABLE review_events; DROP TABLE review_profiles;");
+      legacy.exec("DROP TABLE agent_reports; DROP TABLE review_evaluations; DROP TABLE review_events; DROP TABLE review_profiles;");
       legacy.exec("DROP TRIGGER skyward_assignment_identity; DROP TABLE canvas_match_runs; DROP TABLE skyward_assignments; DROP TABLE canvas_assignments;");
       legacy.exec("DROP TABLE canvas_audit_events; DROP TABLE canvas_assignment_links; DROP TABLE canvas_course_mappings; DROP TABLE canvas_assignment_observations; DROP TABLE canvas_assignment_courses; DROP TABLE canvas_assignment_runs; DROP TABLE grade_import_events; DROP TABLE grade_observations; DROP TABLE grade_students; DROP TABLE grade_runs; DROP TABLE assignment_import_events; DROP TABLE assignment_observations; DROP TABLE assignment_sections; DROP TABLE assignment_runs; DROP TABLE cleanup_events; ALTER TABLE collection_runs DROP COLUMN removed_message_count; PRAGMA user_version = 1;");
       assert.throws(() => new SqliteMessageStore(file, randomBytes(32)), /Incorrect storage key/);
@@ -125,7 +125,7 @@ test("migrates existing records from version 1 and rolls back a failed cleanup a
     const store = new SqliteMessageStore(file, key);
     const connection = new Database(file);
     try {
-      assert.equal(connection.pragma("user_version", { simple: true }), 7);
+      assert.equal(connection.pragma("user_version", { simple: true }), 8);
       assert.deepEqual(store.getRun("parent", run.runId), { ...run, selection: "all" });
       connection.exec("CREATE TRIGGER fail_cleanup BEFORE INSERT ON cleanup_events BEGIN SELECT RAISE(ABORT, 'test cleanup failure'); END;");
       assert.throws(() => store.truncateMessages("parent", { target: "LoginNotification" }), /test cleanup failure/);
@@ -264,7 +264,7 @@ test("persists encrypted data, rolls back failed writes, and restores an online 
     store.importRun("parent", run);
     const connection = new Database(file);
     try {
-      assert.equal(connection.pragma("user_version", { simple: true }), 7);
+      assert.equal(connection.pragma("user_version", { simple: true }), 8);
       connection.exec("CREATE TRIGGER test_failure BEFORE INSERT ON message_observations BEGIN SELECT RAISE(ABORT, 'test failure'); END;");
       assert.throws(() => store.importRun("parent", sample()), /test failure/);
       assert.equal(store.listRuns("parent").length, 1);

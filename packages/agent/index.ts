@@ -1,28 +1,6 @@
 import type { StudentSnapshot } from "@schoolhawk/core/student-snapshot";
-
-export interface AgentReply {
-  provider: string;
-  responseId: string;
-  receivedAt: string;
-  durationMs: number;
-  text: string;
-  usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
-}
-
-export interface AgentConnectionTest extends AgentReply {
-  kind: "connection-test";
-  connected: true;
-}
-
-export interface StudentReportAnalysis extends AgentReply {
-  kind: "student-report-analysis";
-  snapshotId: string;
-  reviewId: string;
-  studentRefs: string[];
-  sourceStatus: StudentSnapshot["status"];
-  sourceNotices: StudentSnapshot["notices"];
-  validation: "unverified-ai-analysis";
-}
+import type { AgentConnectionTest, StudentReportAnalysis } from "@schoolhawk/core/agent-reports";
+export type { AgentReply, AgentConnectionTest, StudentReportAnalysis } from "@schoolhawk/core/agent-reports";
 
 export interface StudentReportAgent {
   testConnection(): Promise<AgentConnectionTest>;

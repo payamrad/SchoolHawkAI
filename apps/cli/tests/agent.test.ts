@@ -3,10 +3,13 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import Database from "better-sqlite3";
 import { AgentError } from "@schoolhawk/agent";
+import { storedAgentReportSchema } from "@schoolhawk/core/agent-reports";
 import { studentSnapshotSchema } from "@schoolhawk/core/student-snapshot";
 import { withLocalDiagnostics } from "@schoolhawk/storage/diagnostics";
 import { SqliteReviewStore } from "@schoolhawk/storage/review-sqlite";
+import { AgentReportStorageError } from "@schoolhawk/storage/agent-reports";
 import { apiKey, environment, foundryResponse, studentReportFixture } from "../../../packages/agent/tests/fixtures";
 import { namedFamilyFixture } from "../../../packages/core/tests/review-fixtures";
 import { setupDatabase } from "../../../scripts/setup-database";
@@ -23,7 +26,10 @@ test("Agent help and strict arguments require no credentials, database, logs or 
     assert.equal(existsSync(path.join(root, "data")), false);
     for (const args of [[], ["unknown"], ["test", "--config", "x"], ["analyze"],
       ["analyze", "--config", "x", "--report", "y"], ["analyze", "--report", "x", "--report=y"],
-      ["analyze", "--report="], ["test", "--api-key", "PRIVATE"], ["analyze", "--report", "x", "extra"]]) {
+      ["analyze", "--report="], ["test", "--api-key", "PRIVATE"], ["analyze", "--report", "x", "extra"],
+      ["reports", "--config", "x"], ["reports", "--limit", "0"], ["reports", "--limit", "1001"],
+      ["reports", "--offset", "-1"], ["reports", "--limit", "1", "--limit=2"],
+      ["report"], ["report", "--id", "invalid"], ["__proto__"]]) {
       assert.throws(() => parseAgentArgs(args), AgentUsageError);
     }
     assert.equal(parseAgentArgs(["test"]).command, "test");
@@ -55,7 +61,7 @@ test("Agent test communicates with synthetic input without opening school storag
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("Agent analyze sends a private report unchanged and returns its linked AI analysis without persisting that analysis", async context => {
+test("Agent analyze saves a private report response before printing it, and saved reports can be read without Azure credentials", async context => {
   const root = mkdtempSync(path.join(tmpdir(), "schoolhawk-agent-report-"));
   const output: string[] = [];
   context.mock.method(console, "log", (value: string) => output.push(value));
@@ -67,19 +73,37 @@ test("Agent analyze sends a private report unchanged and returns its linked AI a
   context.mock.method(globalThis, "fetch", async (_url: unknown, options: RequestInit) => {
     const request = JSON.parse(String(options.body));
     assert.deepEqual(JSON.parse(request.input[0].content[0].text), report);
+    const connection = new Database(path.join(root, "data/database/schoolhawk.sqlite"));
+    try { connection.exec("BEGIN IMMEDIATE; ROLLBACK;"); }
+    finally { connection.close(); }
     return new Response(JSON.stringify(foundryResponse("PRIVATE_ANALYSIS")));
   });
   try {
+    setupDatabase(root);
     await withLocalDiagnostics(root, "cli", () => runAgentCli(["analyze", "--report", "report.json"], root, environment));
-    const result = JSON.parse(output[0]);
+    const result = storedAgentReportSchema.parse(JSON.parse(output[0]));
     assert.equal(result.text, "PRIVATE_ANALYSIS");
     assert.equal(result.snapshotId, report.id);
     assert.equal(result.studentRefs.length, 2);
     assert.equal(readFileSync(file, "utf8"), contents);
-    assert.equal(existsSync(path.join(root, "data")), false);
+    const key = readFileSync(path.join(root, "playwright/.auth/messages.key"));
+    const store = new SqliteReviewStore(path.join(root, "data/database/schoolhawk.sqlite"), key);
+    try { assert.deepEqual(store.getAgentReport(result.reportId), result); }
+    finally { store.close(); key.fill(0); }
+    context.mock.method(globalThis, "fetch", async () => { throw new Error("Saved-report inspection must not call Azure."); });
+    await runAgentCli(["reports", "--limit", "1"], root, {});
+    const listing = JSON.parse(output[1]);
+    assert.equal(listing.reports[0].reportId, result.reportId);
+    assert.equal(listing.reports[0].studentCount, 2);
+    assert.equal(Object.hasOwn(listing.reports[0], "text"), false);
+    await runAgentCli(["report", "--id", result.reportId], root, {});
+    assert.deepEqual(JSON.parse(output[2]), result);
+    await assert.rejects(runAgentCli(["report", "--id", `report_${"0".repeat(64)}`], root, {}), /No saved AI report/);
     const log = readFileSync(path.join(root, "logs", readdirSync(path.join(root, "logs"))[0]), "utf8");
     assert.match(log, /AGENT_ANALYSIS_SUMMARY/);
-    assert.doesNotMatch(log, /PRIVATE|Quinn|Rowan/);
+    assert.match(log, /AGENT_REPORT_SAVED/);
+    assert.doesNotMatch(log, /PRIVATE_ANALYSIS|PRIVATE_AGENT_KEY|PRIVATE_MESSAGE_BODY|PRIVATE_TITLE|PRIVATE_DESCRIPTION|PRIVATE_SENDER|PRIVATE_TEACHER|Quinn|Rowan/);
+    assert(!log.includes(report.id));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -112,6 +136,47 @@ test("Agent analyze can build the current name-matched snapshot from local data 
     await withLocalDiagnostics(root, "cli", () => runAgentCli(["analyze", "--config", "review.json"], root, environment));
     assert.equal(requests, 1);
     assert.equal(JSON.parse(output[0]).studentRefs.length, 2);
+    assert(storedAgentReportSchema.safeParse(JSON.parse(output[0])).success);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("valid file-based analysis requires local storage before an agent request is sent", async context => {
+  const root = mkdtempSync(path.join(tmpdir(), "schoolhawk-agent-no-storage-"));
+  context.mock.method(console, "error", () => {});
+  const file = path.join(root, "report.json");
+  writeFileSync(file, JSON.stringify(studentReportFixture()), { mode: 0o600 });
+  let requests = 0;
+  context.mock.method(globalThis, "fetch", async () => { requests++; return new Response(JSON.stringify(foundryResponse())); });
+  try {
+    await assert.rejects(runAgentCli(["analyze", "--report", file], root, environment));
+    assert.equal(requests, 0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a response that cannot be saved fails the command without printing a success-shaped report", async context => {
+  const root = mkdtempSync(path.join(tmpdir(), "schoolhawk-agent-save-failure-"));
+  const output: string[] = [];
+  context.mock.method(console, "log", (value: string) => output.push(value));
+  context.mock.method(console, "error", () => {});
+  const file = path.join(root, "report.json");
+  writeFileSync(file, JSON.stringify(studentReportFixture()), { mode: 0o600 });
+  let requests = 0;
+  context.mock.method(globalThis, "fetch", async () => {
+    requests++;
+    return new Response(JSON.stringify(foundryResponse("PRIVATE_UNSAVED_ANALYSIS")));
+  });
+  context.mock.method(SqliteReviewStore.prototype, "saveAgentReport", () => {
+    throw new AgentReportStorageError("The AI response could not be saved locally.");
+  });
+  try {
+    setupDatabase(root);
+    await assert.rejects(runAgentCli(["analyze", "--report", file], root, environment), error => {
+      assert(error instanceof AgentReportStorageError);
+      assert.match(cliFailureMessage(error, ["Agent", "analyze"]), /^AGENT:.*could not be saved/);
+      return true;
+    });
+    assert.equal(requests, 1);
+    assert.deepEqual(output, []);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

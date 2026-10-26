@@ -4,9 +4,10 @@ Updated: 2026-10-25
 
 Status: Local collection, storage, deterministic review, bounded briefings, and full current-student snapshots are implemented. Live portal compatibility, downstream summarization/delivery, and unattended-deployment acceptance gates remain to be verified.
 
-An opt-in Azure Foundry agent interface now supports connection tests and full
-student-report submission. AI-output grounding, persistence, delivery, and the
-remaining Phase 6 acceptance gates are not yet complete.
+An opt-in Azure Foundry agent interface now supports connection tests, full
+student-report submission, and encrypted persistence of completed AI responses.
+AI-output grounding, delivery, and the remaining Phase 6 acceptance gates are not
+yet complete.
 
 ## 1. Purpose and Product Boundary
 
@@ -357,7 +358,7 @@ or truncated input. It also supports deterministic local text output.
 
 This implements the local change/priority and structured-input stages only.
 Attendance/calendar/form collection, semantic urgency from teacher text,
-report grounding/storage, scheduling, and email/SMS delivery remain outside this
+report grounding, scheduling, and email/SMS delivery remain outside this
 slice. The separate opt-in Foundry client can submit full student snapshots.
 Immediate-delivery eligibility is opt-in and sends nothing.
 Review audit history has no automatic retention/deletion job yet.
@@ -465,8 +466,13 @@ Implemented transport slice: `StudentReportAgent.testConnection()` and
 agent system prompt, sends complete validated snapshots as untrusted user data,
 and makes stateless requests without client tools. Credentials and model content
 are excluded from diagnostics; timeouts, HTTP failures, refusals, and oversized
-or incomplete replies fail explicitly. This is not yet source-grounded validation
-of AI conclusions, automatic report storage, context-aware partitioning, or delivery.
+or incomplete replies fail explicitly. Migration 008 stores completed analyses
+and provenance transactionally as encrypted, append-only `agent_reports`.
+`Agent analyze` requires local storage before contacting the model and commits the
+response before reporting success; `Agent reports` and `Agent report` inspect
+saved results without model credentials. Duplicate response saves are idempotent,
+and storage failures remain explicit. This is not yet source-grounded validation
+of AI conclusions, context-aware partitioning, or delivery.
 
 Exit gate: agent cannot obtain secrets, browse arbitrarily, run arbitrary commands, or mutate portal data; actionable claims reference known evidence; model failures do not break collection or deterministic alerts.
 

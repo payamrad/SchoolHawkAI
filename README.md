@@ -471,7 +471,8 @@ untrusted data, never system instructions or authorization to use tools. Approve
 provider, fields, retention policy, and delivery channel before transmitting anything.
 The Azure Foundry agent adapter below consumes the full student snapshot; this
 bounded contract remains available for other summarization consumers.
-Fact-checking/saving model reports and email/SMS delivery are not implemented.
+Completed agent analyses are saved locally as described below. Fact-checking model
+conclusions and email/SMS delivery are not implemented.
 `renderDeterministicBriefing` / `--text` provides a local model-free fallback.
 
 ## Full Current-Student Snapshot
@@ -594,7 +595,8 @@ Generation refreshes the deterministic review and reads source history under one
 SQLite transaction. It preserves source records and mappings; the source data and
 review history retain their existing encryption. The full snapshot is returned to
 the caller/stdout, not automatically written to a plaintext file or sent anywhere.
-Persisting validated AI-written reports and email/SMS delivery remain later stages.
+The separate agent-analysis command persists completed AI responses. Evidence-based
+validation of their conclusions and email/SMS delivery remain later stages.
 
 ## Azure Foundry Agent Integration
 
@@ -651,7 +653,7 @@ provider, fields, and retention terms before using real records. Regular `Review
 commands and the existing pipeline remain local; they do not call the agent.
 
 ```bash
-# Generate the current name-matched snapshot, close storage, then send it.
+# Generate the current name-matched snapshot, send it, and save the AI response.
 node --env-file=.env --import tsx apps/cli/src/index.ts Agent analyze --config config/review.local.json
 
 # Or send an existing private, schema-valid student snapshot.
@@ -662,10 +664,52 @@ Existing report files must be private regular files (`0600`), not symlinks.
 `--config` uses the normal 60-day assignment and 14-day message windows; use
 `Review snapshot` to prepare different windows before choosing `--report`.
 CLI responses are JSON and may contain private AI-generated text.
+Both analysis modes require the existing local database and its original encryption
+key. Storage is opened and validated before the request is sent. The database
+connection remains available, but no SQL transaction or write lock is held while
+waiting for the agent. After the response completes, saving is a separate atomic
+transaction. Success is printed only after the saved report has committed.
+
+### Saved AI reports
+
+Migration 008 adds append-only `agent_reports` storage. Each report retains the
+complete returned analysis text, provider/response ID, receipt time, duration,
+token usage when available, snapshot/review IDs, student references, and source
+coverage warnings. The JSON response includes a local `reportId`, `savedAt`, and
+storage `version` in addition to the existing analysis fields.
+
+The full payload is encrypted with the existing AES-256-GCM storage protection and
+original database key. Only its opaque local ID, provider, timestamps, and student
+count remain indexable metadata. Backups include these reports; no plaintext
+report file is created automatically. Identical saves of the same provider response
+reuse the original record; conflicting contents cannot overwrite it. There is no
+automatic report-retention/deletion job, and source-message cleanup does not delete
+AI reports or backups.
+
+Inspect saved reports without an Azure key or network access:
+
+```bash
+npm run cli -- Agent reports --limit 20
+npm run cli -- Agent reports --limit 20 --offset 20
+npm run cli -- Agent report --id <reportId>
+```
+
+Lists show metadata only, newest receipt first; `report` returns the full saved
+response. These commands still require the local storage key. A connection test
+does not require storage and is not saved as a student report. Previously unsaved
+responses are not backfilled automatically.
+
+Only the returned analysis and its provenance IDs are archived, not an additional
+copy of the full submitted snapshot. Keep externally supplied report files if you
+need to reproduce their exact inputs; their review IDs need not belong to this
+database. The storage contract is `AgentReportStore`, implemented by
+`SqliteReviewStore`, with `saveAgentReport`, `getAgentReport`, and `listAgentReports`.
 
 Programmatic callers can create `AzureFoundryAgent` from
 `@schoolhawk/agent/azure-foundry`, supplying `endpoint` and `apiKey`, or call
-`createAzureFoundryAgentFromEnv()`. Both implement the same interface.
+`createAzureFoundryAgentFromEnv()`. Both implement the same transport interface.
+Custom orchestration must pass completed analyses to `AgentReportStore`; the CLI
+does this automatically for both `--config` and `--report`.
 
 Each call uses a fresh, non-streaming Responses request with `store: false`, no
 conversation/previous-response ID, and no client tools. Report JSON is user-input
@@ -685,8 +729,10 @@ not fact-check the model's academic conclusions or validate its citations. Paren
 must verify recommendations against source evidence and collection limitations.
 The returned `sourceStatus` and `sourceNotices` preserve deterministic input
 coverage warnings independently of anything the model says.
-No AI analysis is automatically persisted, delivered, or used to change school
-records or deterministic priorities. On an agent outage, the independent local
+Stored analyses retain that unverified label; saving is not approval of their
+recommendations. No analysis is automatically delivered or used to change school
+records or deterministic priorities. Storage failures fail the command instead of
+printing an unsaved success result. On an agent outage, the independent local
 `Review briefing --text` remains available.
 
 ## Canvas Login

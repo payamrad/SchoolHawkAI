@@ -3,12 +3,13 @@ import {
   SNAPSHOT_MAX_BYTES, serializeStudentSnapshot, studentSnapshotSchema, type StudentSnapshot,
 } from "@schoolhawk/core/student-snapshot";
 import { DiagnosticLogError, reportDiagnostic, type DiagnosticEvent } from "@schoolhawk/core/diagnostics";
+import { agentReplySchema, MAX_AGENT_RESPONSE_BYTES } from "@schoolhawk/core/agent-reports";
 import {
   AgentError, type AgentConnectionTest, type AgentReply, type StudentReportAgent, type StudentReportAnalysis,
 } from "./index";
 
 export const DEFAULT_FOUNDRY_API_VERSION = "2025-11-15-preview";
-export const MAX_AGENT_RESPONSE_BYTES = 1024 * 1024;
+export { MAX_AGENT_RESPONSE_BYTES } from "@schoolhawk/core/agent-reports";
 const apiVersionSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}(?:-preview)?$/);
 const optionsSchema = z.object({
   endpoint: z.string().min(1).max(2048),
@@ -172,7 +173,9 @@ export class AzureFoundryAgent implements StudentReportAgent {
       stage = "AGENT_RESPONSE";
       reportDiagnostic({ level: "info", code: "STAGE_STARTED", stage });
       const reply = parseReply(await readResponse(response));
-      return { ...reply, provider: "azure-foundry", receivedAt: new Date().toISOString(), durationMs: Math.max(0, Date.now() - started) };
+      return agentReplySchema.parse({
+        ...reply, provider: "azure-foundry", receivedAt: new Date().toISOString(), durationMs: Math.max(0, Date.now() - started),
+      });
     } catch (error) {
       if (error instanceof DiagnosticLogError) throw error;
       const failure = error instanceof AgentError ? error : new AgentError(controller.signal.aborted ? "TIMEOUT" :

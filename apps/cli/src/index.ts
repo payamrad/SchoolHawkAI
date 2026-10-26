@@ -10,6 +10,7 @@ import { ReviewError } from "@schoolhawk/core/review";
 import { ReviewUsageError, runReviewCli } from "./review";
 import { AgentError } from "@schoolhawk/agent";
 import { AgentUsageError, runAgentCli } from "./agent";
+import { AgentReportStorageError } from "@schoolhawk/storage/agent-reports";
 
 const HELP = `SchoolHawkAI
 
@@ -154,7 +155,7 @@ async function executeCli(args: string[], root: string): Promise<void> {
 
 export function cliFailureMessage(error: unknown, args: string[]): string {
   if (error instanceof DiagnosticLogError) return `LOCAL_LOG: ${error.message}`;
-  if (error instanceof AgentError || error instanceof AgentUsageError) return `AGENT: ${error.message}`;
+  if (error instanceof AgentError || error instanceof AgentUsageError || error instanceof AgentReportStorageError) return `AGENT: ${error.message}`;
   if (error instanceof ReviewUsageError || error instanceof ReviewError) return `REVIEW: ${error.message}`;
   if (error instanceof CanvasMappingError) {
     const guidance = error.code === "NO_COURSE_MAPPINGS"
