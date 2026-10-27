@@ -46,13 +46,16 @@ test("exported values, including empty values, override dotenv without mutating 
   } finally { input.close(); }
 });
 
-test("Brevo credentials, sender settings and recipient lists are supported without evaluating their contents", () => {
+test("Brevo email and Twilio SMS credentials, senders and recipient lists load without evaluating their contents", () => {
   const input = fixture([
     "BREVO_KEY=PRIVATE_KEY",
     "BREVIO_KEY=PRIVATE_ALIAS",
     "BREVO_SENDER_EMAIL=sender@example.test",
     "BREVO_SENDER_NAME=SchoolHawkAI",
-    "BREVO_SMS_SENDER=SchoolHawk",
+    `TWILIO_ACCOUNT_SID=AC${"a".repeat(32)}`,
+    "TWILIO_AUTH_TOKEN=PRIVATE_TWILIO_TOKEN",
+    "TWILIO_FROM_NUMBER=+12025550100",
+    `TWILIO_MESSAGING_SERVICE_SID=MG${"b".repeat(32)}`,
     "REPORT_EMAIL_RECIPIENTS=parent@example.test,other@example.test",
     "REPORT_SMS_RECIPIENTS=+12025550123",
   ].join("\n"));
@@ -60,6 +63,10 @@ test("Brevo credentials, sender settings and recipient lists are supported witho
     const result = readPipelineEnvironment(input.file, {}, true);
     assert.equal(result.values.BREVO_KEY, "PRIVATE_KEY");
     assert.equal(result.values.BREVIO_KEY, "PRIVATE_ALIAS");
+    assert.equal(result.values.TWILIO_ACCOUNT_SID, `AC${"a".repeat(32)}`);
+    assert.equal(result.values.TWILIO_AUTH_TOKEN, "PRIVATE_TWILIO_TOKEN");
+    assert.equal(result.values.TWILIO_FROM_NUMBER, "+12025550100");
+    assert.equal(result.values.TWILIO_MESSAGING_SERVICE_SID, `MG${"b".repeat(32)}`);
     assert.equal(result.values.REPORT_EMAIL_RECIPIENTS, "parent@example.test,other@example.test");
     assert.equal(result.values.REPORT_SMS_RECIPIENTS, "+12025550123");
   } finally { input.close(); }

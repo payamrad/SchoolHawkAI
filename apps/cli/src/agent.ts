@@ -29,7 +29,8 @@ This is an explicit external transmission of private
 educational data. Approve the provider and its data handling before using real data.
 --config generates the normal 60-day assignment / 14-day message snapshot first.
 --report sends an existing validated snapshot, including any custom report windows.
---notify also sends the saved response through the configured Brevo recipient lists.
+--notify emails saved reports through Brevo and sends short SMS notices through Twilio.
+Recipients come from the private REPORT_EMAIL_RECIPIENTS and REPORT_SMS_RECIPIENTS lists.
 --per-student generates and saves one individually scoped AI report per named child.
 It requires --config, preserves shared account context, and attempts children independently.
 Before analyzing, a stable hash of school facts is compared with the last successfully

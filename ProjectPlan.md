@@ -177,7 +177,7 @@ The pipeline imports a private repository-root `.env` before actual execution,
 or a selected `--env-file`, using dotenv parsing rather than shell evaluation.
 Existing exported settings win. Help/dry-run do not read credentials; unsafe or
 unsupported environment files stop execution before login. Only the matching
-portal credentials reach each login subprocess. Azure/Brevo credentials and
+portal credentials reach each login subprocess. Azure/Brevo/Twilio credentials and
 recipient settings are excluded from collection/local-reporting commands; the
 explicit notification coordinator receives only its model/delivery settings.
 Scheduled-service secret
@@ -347,7 +347,7 @@ not fact-checking of the AI's conclusions. SMS preparation produces a bounded no
 and local report reference without names or grades. Destinations are explicit
 application inputs, never model-selected. Channel adapters return acceptance
 receipts; unknown outcomes remain explicit and are not automatically retried.
-Brevo email/SMS adapters and private recipient lists are now implemented, with
+Brevo email and Twilio SMS adapters and private recipient lists are now implemented, with
 explicit test/send commands and an opt-in `--notify` pipeline path. Sender approval,
 US SMS registration, sufficient credits, durable delivery/outbox state, quiet hours,
 and scheduled-dispatch acceptance gates remain to be completed or verified.
@@ -500,7 +500,7 @@ and provenance transactionally as encrypted, append-only `agent_reports`.
 response before reporting success; `Agent reports` and `Agent report` inspect
 saved results without model credentials. Duplicate response saves are idempotent,
 and storage failures remain explicit. This is not yet source-grounded validation
-of AI conclusions or context-aware partitioning. Explicit Brevo delivery now follows
+of AI conclusions or context-aware partitioning. Explicit Brevo email/Twilio SMS delivery now follows
 successful local persistence when requested; delivery failures do not discard the
 saved AI response.
 

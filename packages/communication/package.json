@@ -2,7 +2,7 @@
   "name": "@schoolhawk/communication",
   "version": "0.0.0",
   "private": true,
-  "exports": { ".": "./index.ts", "./brevo": "./brevo.ts" },
+  "exports": { ".": "./index.ts", "./brevo": "./brevo.ts", "./twilio": "./twilio.ts" },
   "scripts": { "test": "tsx --test tests/*.test.ts" },
   "dependencies": { "@schoolhawk/core": "0.0.0", "zod": "^4.6.5" }
 }

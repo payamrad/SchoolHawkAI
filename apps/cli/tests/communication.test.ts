@@ -6,10 +6,15 @@ import { test } from "node:test";
 import { withLocalDiagnostics } from "@schoolhawk/storage/diagnostics";
 import { SqliteReviewStore } from "@schoolhawk/storage/review-sqlite";
 import { CommunicationError } from "@schoolhawk/communication";
-import { brevoEnvironment, savedReport } from "../../../packages/communication/tests/fixtures";
+import { brevoEnvironment, savedReport, twilioEnvironment, twilioReceipt } from "../../../packages/communication/tests/fixtures";
 import { setupDatabase } from "../../../scripts/setup-database";
 import { runCli } from "../src/index";
 import { CommunicationUsageError, ReportDeliveryError, parseCommunicationArgs, prepareReportDelivery, runCommunicationCli } from "../src/communication";
+
+function requestBody(url: unknown, options: RequestInit): Record<string, unknown> {
+  return String(url).startsWith("https://api.twilio.com/") ? Object.fromEntries(new URLSearchParams(String(options.body))) :
+    JSON.parse(String(options.body));
+}
 
 function seed(root: string) {
   setupDatabase(root);
@@ -56,26 +61,28 @@ test("explicit tests send exactly one harmless message per selected channel, not
   context.mock.method(console, "log", (value: string) => output.push(value));
   context.mock.method(console, "error", () => {});
   context.mock.method(globalThis, "fetch", async (url: unknown, options: RequestInit) => {
-    calls.push({ url: String(url), body: JSON.parse(String(options.body)) });
-    return new Response(JSON.stringify(String(url).endsWith("/smtp/email") ? { messageId: "<test@brevo.test>" } : { messageId: 12345 }), { status: 201 });
+    calls.push({ url: String(url), body: requestBody(url, options) });
+    return new Response(JSON.stringify(String(url).endsWith("/smtp/email") ? { messageId: "<test@brevo.test>" } : twilioReceipt()), { status: 201 });
   });
   try {
-    const env = { ...brevoEnvironment, REPORT_EMAIL_RECIPIENTS: "not-the-test@example.test", REPORT_SMS_RECIPIENTS: "+12025550124" };
-    await withLocalDiagnostics(root, "cli", () => runCommunicationCli(["test", "--channel", "email", "--to", "parent@example.test"], root, env));
-    await withLocalDiagnostics(root, "cli", () => runCommunicationCli(["test", "--channel", "sms", "--to", "+12025550123"], root, env));
+    const emailEnv = { ...brevoEnvironment, REPORT_EMAIL_RECIPIENTS: "not-the-test@example.test" };
+    const smsEnv = { ...twilioEnvironment, REPORT_SMS_RECIPIENTS: "+12025550124" };
+    await withLocalDiagnostics(root, "cli", () => runCommunicationCli(["test", "--channel", "email", "--to", "parent@example.test"], root, emailEnv));
+    await withLocalDiagnostics(root, "cli", () => runCommunicationCli(["test", "--channel", "sms", "--to", "+12025550123"], root, smsEnv));
     assert.equal(calls.length, 2);
     assert.deepEqual(calls[0].body.to, [{ email: "parent@example.test" }]);
-    assert.equal(calls[1].body.recipient, "+12025550123");
+    assert.equal(calls[1].url, `https://api.twilio.com/2010-04-01/Accounts/${twilioEnvironment.TWILIO_ACCOUNT_SID}/Messages.json`);
+    assert.equal(calls[1].body.To, "+12025550123");
     assert.match(String(calls[0].body.textContent), /No student records/);
-    assert.match(String(calls[1].body.content), /No student records/);
+    assert.match(String(calls[1].body.Body), /Twilio SMS test.*No student records/);
     assert.equal(JSON.parse(output[0]).status, "accepted");
-    assert.equal(JSON.parse(output[1]).status, "accepted");
+    assert.equal(JSON.parse(output[1]).provider, "twilio-sms");
     assert.equal(existsSync(path.join(root, "data")), false);
     for (const file of readdirSync(path.join(root, "logs"))) {
       const log = readFileSync(path.join(root, "logs", file), "utf8");
-      assert.doesNotMatch(log, /PRIVATE_BREVO_KEY|parent@example|12025550123/);
+      assert.doesNotMatch(log, /PRIVATE_BREVO_KEY|PRIVATE_TWILIO_TOKEN|Basic |parent@example|12025550123/);
     }
-    await assert.rejects(runCommunicationCli(["test", "--channel", "sms", "--to", "7146004407"], root, env), CommunicationUsageError);
+    await assert.rejects(runCommunicationCli(["test", "--channel", "sms", "--to", "7146004407"], root, smsEnv), CommunicationUsageError);
     assert.equal(calls.length, 2);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -87,15 +94,15 @@ test("saved reports fan out to private lists independently, and a partial failur
   context.mock.method(console, "log", (value: string) => output.push(value));
   context.mock.method(console, "error", () => {});
   context.mock.method(globalThis, "fetch", async (url: unknown, options: RequestInit) => {
-    assert(String(url).startsWith("https://api.brevo.com/"));
-    calls.push({ url: String(url), body: JSON.parse(String(options.body)) });
+    assert(String(url).startsWith("https://api.brevo.com/") || String(url).startsWith("https://api.twilio.com/"));
+    calls.push({ url: String(url), body: requestBody(url, options) });
     return String(url).endsWith("/smtp/email")
       ? new Response(JSON.stringify({ messageId: `<email-${calls.length}@brevo.test>` }), { status: 201 })
-      : new Response(JSON.stringify({ code: "not_enough_credits", message: "PRIVATE provider detail" }), { status: 402 });
+      : new Response(JSON.stringify({ code: 21606, message: "PRIVATE provider detail" }), { status: 400 });
   });
   try {
     const stored = seed(root);
-    const env = { ...brevoEnvironment, REPORT_EMAIL_RECIPIENTS: "parent@example.test,other@example.test" };
+    const env = { ...brevoEnvironment, ...twilioEnvironment, REPORT_EMAIL_RECIPIENTS: "parent@example.test,other@example.test" };
     await assert.rejects(withLocalDiagnostics(root, "cli", () =>
       runCommunicationCli(["send", "--report", stored.reportId], root, env)), ReportDeliveryError);
     const result = JSON.parse(output[0]);
@@ -103,14 +110,22 @@ test("saved reports fan out to private lists independently, and a partial failur
     assert.equal(result.status, "partial");
     assert.equal(result.accepted.length, 2);
     assert.equal(result.failed.length, 1);
-    assert.equal(result.failed[0].code, "PROVIDER_CREDITS");
+    assert.equal(result.failed[0].code, "PROVIDER_SENDER");
     assert.equal(calls.length, 3);
     const emails = calls.filter(call => call.url.endsWith("/smtp/email"));
     assert(emails.every(call => Array.isArray(call.body.to) && call.body.to.length === 1));
     assert(emails.every(call => String(call.body.textContent).endsWith(stored.text)));
-    const sms = calls.find(call => call.url.endsWith("/transactionalSMS/sms"))!;
-    assert(!String(sms.body.content).includes(stored.text));
+    const sms = calls.find(call => call.url.endsWith("/Messages.json"))!;
+    assert(!String(sms.body.Body).includes(stored.text));
     const log = readFileSync(path.join(root, "logs", readdirSync(path.join(root, "logs"))[0]), "utf8");
-    assert.doesNotMatch(log, /PRIVATE_AI_REPORT_TEXT|PRIVATE_BREVO_KEY|parent@example|12025550123/);
+    assert.doesNotMatch(log, /PRIVATE_AI_REPORT_TEXT|PRIVATE_BREVO_KEY|PRIVATE_TWILIO_TOKEN|Basic |parent@example|12025550123/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("report delivery constructs only providers with selected nonempty recipient lists", () => {
+  assert(prepareReportDelivery({ ...brevoEnvironment, REPORT_SMS_RECIPIENTS: "" }).communicator);
+  assert(prepareReportDelivery({ ...twilioEnvironment, REPORT_SMS_RECIPIENTS: "+12025550123",
+    BREVO_KEY: "conflicting", BREVIO_KEY: "unused" }, "sms").communicator);
+  assert.throws(() => prepareReportDelivery(brevoEnvironment), CommunicationError);
+  assert.throws(() => prepareReportDelivery({ ...twilioEnvironment, REPORT_EMAIL_RECIPIENTS: "parent@example.test" }), CommunicationError);
 });

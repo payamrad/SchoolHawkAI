@@ -10,7 +10,7 @@ import { studentSnapshotSchema } from "@schoolhawk/core/student-snapshot";
 import { withLocalDiagnostics } from "@schoolhawk/storage/diagnostics";
 import { SqliteReviewStore } from "@schoolhawk/storage/review-sqlite";
 import { AgentReportStorageError } from "@schoolhawk/storage/agent-reports";
-import { brevoEnvironment } from "../../../packages/communication/tests/fixtures";
+import { brevoEnvironment, twilioEnvironment } from "../../../packages/communication/tests/fixtures";
 import { ReportDeliveryError } from "../src/communication";
 import { apiKey, environment, foundryResponse, studentReportFixture } from "../../../packages/agent/tests/fixtures";
 import { namedFamilyFixture } from "../../../packages/core/tests/review-fixtures";
@@ -75,7 +75,7 @@ test("per-student analysis sends one named email per child and never invokes SMS
     } finally { store.close(); key.fill(0); }
     writeFileSync(path.join(root, "review.json"), JSON.stringify(settings), { mode: 0o600 });
     await runAgentCli(["analyze", "--config", "review.json", "--per-student", "--notify", "--assignment-days", "7", "--message-days", "7"],
-      root, { ...environment, ...brevoEnvironment, REPORT_SMS_RECIPIENTS: "", BREVO_SMS_SENDER: undefined });
+      root, { ...environment, ...brevoEnvironment, REPORT_SMS_RECIPIENTS: "" });
     const result = JSON.parse(output[0]);
     assert.equal(result.kind, "student-report-batch");
     assert.equal(result.status, "complete");
@@ -145,10 +145,10 @@ test("notified analysis validates recipients before Azure, saves the response, a
       assert(report.notices.includes("collection-incomplete"));
       return new Response(JSON.stringify(foundryResponse("PRIVATE_NOTIFY_ANALYSIS")));
     }
-    assert(target.startsWith("https://api.brevo.com/"));
+    assert(target.startsWith("https://api.brevo.com/") || target.startsWith("https://api.twilio.com/"));
     return target.endsWith("/smtp/email")
       ? new Response(JSON.stringify({ messageId: "<notify@brevo.test>" }), { status: 201 })
-      : new Response(JSON.stringify({ code: "not_enough_credits" }), { status: 402 });
+      : new Response(JSON.stringify({ code: 21606 }), { status: 400 });
   });
   const file = path.join(root, "report.json");
   writeFileSync(file, JSON.stringify(studentReportFixture()), { mode: 0o600 });
@@ -157,12 +157,15 @@ test("notified analysis validates recipients before Azure, saves the response, a
     assert.equal(calls.length, 0);
     setupDatabase(root);
     await assert.rejects(runAgentCli(["analyze", "--report", file, "--notify", "--collection-incomplete"], root,
-      { ...environment, ...brevoEnvironment }), ReportDeliveryError);
+      { ...environment, ...brevoEnvironment, ...twilioEnvironment }), ReportDeliveryError);
     assert.equal(calls.length, 3);
     const result = JSON.parse(output[0]);
     assert.equal(result.communication.status, "partial");
     assert.equal(result.sourceStatus, "incomplete-source-coverage");
     assert.equal(result.communication.accepted.length, 1);
+    assert.equal(result.communication.accepted[0].provider, "brevo-email");
+    assert.equal(result.communication.failed[0].channel, "sms");
+    assert.equal(result.communication.failed[0].code, "PROVIDER_SENDER");
     const key = readFileSync(path.join(root, "playwright/.auth/messages.key"));
     const store = new SqliteReviewStore(path.join(root, "data/database/schoolhawk.sqlite"), key);
     try {

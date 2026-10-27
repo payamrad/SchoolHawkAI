@@ -2,18 +2,13 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   CommunicationError, emailAddressSchema, emailMessageSchema, providerReceiptSchema,
-  reportRecipientsSchema, smsMessageSchema,
-  type ChannelSendOptions, type CommunicationChannelName, type CommunicationChannels,
-  type CommunicationErrorCode, type EmailChannel, type EmailMessage, type ProviderReceipt, type ReportRecipients,
-  type SmsChannel, type SmsMessage,
+  type ChannelSendOptions, type CommunicationErrorCode, type EmailChannel, type EmailMessage, type ProviderReceipt,
 } from "./index";
+import { readProviderResponse } from "./http";
 
 const API_ROOT = "https://api.brevo.com/v3";
-const MAX_RESPONSE_BYTES = 65536;
 const keySchema = z.string().min(1).max(4096).regex(/^[\x21-\x7e]+$/);
 const senderNameSchema = z.string().trim().min(1).max(128).regex(/^[^\r\n\0]+$/);
-const smsSenderSchema = z.string().trim().transform(value => /^\+\d+$/.test(value) ? value.slice(1) : value)
-  .pipe(z.string().regex(/^(?:[A-Za-z0-9]{3,11}|\d{12,15})$/));
 const providerErrorSchema = z.object({
   code: z.enum(["invalid_parameter", "missing_parameter", "out_of_range", "not_enough_credits", "permission_denied",
     "unauthorized", "account_under_validation", "duplicate_parameter", "duplicate_request",
@@ -41,29 +36,8 @@ function apiFailure(status: number, body: unknown): BrevoApiError {
   else if (status === 429) failure = "PROVIDER_RATE_LIMITED";
   else if (code === "account_under_validation") failure = "PROVIDER_ACCOUNT_PENDING";
   else if (code === "duplicate_parameter" || code === "duplicate_request") failure = "PROVIDER_FAILED";
-  else if (status >= 400 && status < 500 && /registration|register|toll.free|country.{0,30}(?:blocked|unavailable|approved)/i.test(message)) {
-    failure = "PROVIDER_REGISTRATION";
-  } else if (status >= 400 && status < 500 && /sender|domain|dkim|dmarc|dns/i.test(message)) failure = "PROVIDER_SENDER";
+  else if (/sender|domain|dkim|dmarc|dns/i.test(message)) failure = "PROVIDER_SENDER";
   return new BrevoApiError(failure, status, code);
-}
-
-async function readResponse(response: Response): Promise<unknown> {
-  if (!response.body) throw new CommunicationError("INVALID_RECEIPT");
-  if (Number(response.headers.get("content-length")) > MAX_RESPONSE_BYTES) throw new CommunicationError("INVALID_RECEIPT");
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let bytes = 0;
-  try {
-    for (;;) {
-      const item = await reader.read();
-      if (item.done) break;
-      bytes += item.value.byteLength;
-      if (bytes > MAX_RESPONSE_BYTES) throw new CommunicationError("INVALID_RECEIPT");
-      chunks.push(item.value);
-    }
-  } finally { reader.releaseLock(); }
-  try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
-  catch { throw new CommunicationError("INVALID_RECEIPT"); }
 }
 
 class BrevoTransport {
@@ -76,15 +50,15 @@ class BrevoTransport {
     this.#fetch = transport;
   }
 
-  async post(resource: "/smtp/email" | "/transactionalSMS/sms", body: unknown, signal: AbortSignal): Promise<unknown> {
+  async post(body: unknown, signal: AbortSignal): Promise<unknown> {
     try {
-      const response = await this.#fetch(`${API_ROOT}${resource}`, {
+      const response = await this.#fetch(`${API_ROOT}/smtp/email`, {
         method: "POST", redirect: "error", signal,
         headers: { accept: "application/json", "content-type": "application/json", "api-key": this.#key },
         body: JSON.stringify(body),
       });
       let data: unknown;
-      try { data = await readResponse(response); }
+      try { data = await readProviderResponse(response); }
       catch (error) {
         if (!response.ok) throw apiFailure(response.status, undefined);
         throw error;
@@ -125,7 +99,7 @@ export class BrevoEmailChannel implements EmailChannel {
     const parsed = emailMessageSchema.safeParse(input);
     if (!parsed.success) throw new CommunicationError("INVALID_MESSAGE");
     const message = parsed.data;
-    const result = await this.#client.post("/smtp/email", {
+    const result = await this.#client.post({
       sender: this.#sender, to: [{ email: message.to }], subject: message.subject, textContent: message.text,
       headers: { idempotencyKey: emailIdempotencyKey(message.idempotencyKey) },
       tags: ["schoolhawk", message.idempotencyKey],
@@ -143,65 +117,12 @@ export class BrevoEmailChannel implements EmailChannel {
   }
 }
 
-export interface BrevoSmsOptions { apiKey: string; sender: string }
-export class BrevoSmsChannel implements SmsChannel {
-  readonly #client: BrevoTransport;
-  readonly #sender: string;
-  constructor(options: BrevoSmsOptions, transport = globalThis.fetch) {
-    const sender = smsSenderSchema.safeParse(options.sender);
-    if (!sender.success) throw new CommunicationError("CONFIGURATION");
-    this.#sender = sender.data;
-    this.#client = new BrevoTransport(options.apiKey, transport);
-  }
-
-  async send(input: Readonly<SmsMessage>, options: ChannelSendOptions): Promise<ProviderReceipt> {
-    const parsed = smsMessageSchema.safeParse(input);
-    if (!parsed.success) throw new CommunicationError("INVALID_MESSAGE");
-    const message = parsed.data;
-    if (message.to.replace(/^\+/, "").length < 6) throw new CommunicationError("INVALID_RECIPIENT");
-    const result = await this.#client.post("/transactionalSMS/sms", {
-      sender: this.#sender, recipient: message.to, content: message.text,
-      type: "transactional", unicodeEnabled: false, tag: message.idempotencyKey,
-    }, options.signal);
-    const response = z.object({ messageId: z.union([
-      z.number().int().positive().max(Number.MAX_SAFE_INTEGER), z.string().regex(/^\d{1,30}$/),
-    ]) }).safeParse(result);
-    if (!response.success) throw new CommunicationError("INVALID_RECEIPT");
-    return providerReceiptSchema.parse({
-      provider: "brevo-sms", providerMessageId: String(response.data.messageId), acceptedAt: new Date().toISOString(), status: "accepted",
-    });
-  }
-}
-
-export function createBrevoChannelsFromEnv(
-  environment: NodeJS.ProcessEnv = process.env, selected: readonly CommunicationChannelName[] = ["email", "sms"],
-): CommunicationChannels {
+export function createBrevoEmailChannelFromEnv(environment: NodeJS.ProcessEnv = process.env): BrevoEmailChannel {
   const primary = environment.BREVO_KEY;
   const alias = environment.BREVIO_KEY;
   if (primary !== undefined && alias !== undefined && primary !== alias) throw new CommunicationError("CONFIGURATION");
   const apiKey = primary ?? alias ?? "";
-  const channels: CommunicationChannels = {};
-  if (selected.includes("email")) channels.email = new BrevoEmailChannel({
+  return new BrevoEmailChannel({
     apiKey, senderEmail: environment.BREVO_SENDER_EMAIL ?? "", senderName: environment.BREVO_SENDER_NAME,
   });
-  if (selected.includes("sms")) channels.sms = new BrevoSmsChannel({ apiKey, sender: environment.BREVO_SMS_SENDER ?? "" });
-  return channels;
-}
-
-export function readReportRecipients(
-  environment: NodeJS.ProcessEnv = process.env, selected: CommunicationChannelName | "all" = "all",
-): ReportRecipients {
-  const list = (value: string | undefined): string[] => {
-    if (value === undefined || !value.trim()) return [];
-    if (Buffer.byteLength(value, "utf8") > 8192) throw new CommunicationError("CONFIGURATION");
-    const parts = value.split(",").map(part => part.trim());
-    if (parts.some(part => !part)) throw new CommunicationError("CONFIGURATION");
-    return parts;
-  };
-  const parsed = reportRecipientsSchema.safeParse({
-    email: selected === "sms" ? [] : list(environment.REPORT_EMAIL_RECIPIENTS),
-    sms: selected === "email" ? [] : list(environment.REPORT_SMS_RECIPIENTS),
-  });
-  if (!parsed.success) throw new CommunicationError("CONFIGURATION");
-  return parsed.data;
 }

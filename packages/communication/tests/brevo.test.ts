@@ -1,19 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { withDiagnosticSink } from "@schoolhawk/core/diagnostics";
-import { CommunicationError, ReportCommunicator, prepareEmailReport, prepareSmsReport } from "../index";
-import { BrevoApiError, BrevoEmailChannel, BrevoSmsChannel, createBrevoChannelsFromEnv, readReportRecipients } from "../brevo";
-import { brevoEnvironment, savedReport } from "./fixtures";
-
-function transportFixture(payload: unknown, status = 201) {
-  const calls: { url: string; options: RequestInit }[] = [];
-  const transport: typeof fetch = async (url, options) => {
-    assert(options);
-    calls.push({ url: String(url), options });
-    return new Response(JSON.stringify(payload), { status });
-  };
-  return { calls, transport };
-}
+import { CommunicationError, ReportCommunicator, prepareEmailReport } from "../index";
+import { BrevoApiError, BrevoEmailChannel, createBrevoEmailChannelFromEnv } from "../brevo";
+import { brevoEnvironment, savedReport, transportFixture } from "./fixtures";
 
 function email(transport: typeof fetch) {
   return new BrevoEmailChannel({ apiKey: brevoEnvironment.BREVO_KEY,
@@ -61,39 +51,12 @@ test("Brevo email accepts either documented single-message receipt shape without
   }
 });
 
-test("Brevo SMS uses the API-reference endpoint and preserves the single-segment transactional notice", async () => {
-  const { calls, transport } = transportFixture({ messageId: 1511882900176220, smsCount: 1, reference: "fixture-reference" });
-  const channel = new BrevoSmsChannel({ apiKey: brevoEnvironment.BREVO_KEY, sender: "SchoolHawk" }, transport);
-  const message = prepareSmsReport(savedReport(), "+12025550123");
-  const result = await channel.send(message, { signal: new AbortController().signal });
-  assert.equal(result.provider, "brevo-sms");
-  assert.equal(result.providerMessageId, "1511882900176220");
-  assert.equal(calls[0].url, "https://api.brevo.com/v3/transactionalSMS/sms");
-  const body = JSON.parse(String(calls[0].options.body));
-  assert.deepEqual(body, { sender: "SchoolHawk", recipient: "+12025550123", content: message.text,
-    type: "transactional", unicodeEnabled: false, tag: message.idempotencyKey });
-  assert(body.content.length <= 160);
-  assert.doesNotMatch(body.content, /PRIVATE_AI_REPORT|STOP/);
-  assert.equal(Object.hasOwn(body, "organisationPrefix"), false);
-  assert.equal(Object.hasOwn(body, "webUrl"), false);
-});
-
-test("unsafe SMS numeric IDs and missing receipts remain uncertain rather than being rounded or fabricated", async () => {
-  for (const messageId of [Number.MAX_SAFE_INTEGER + 1, -1, "not-a-number"]) {
-    const channel = new BrevoSmsChannel({ apiKey: brevoEnvironment.BREVO_KEY, sender: "SchoolHawk" },
-      transportFixture({ messageId }).transport);
-    await assert.rejects(channel.send(prepareSmsReport(savedReport(), "+12025550123"),
-      { signal: new AbortController().signal }), error => error instanceof CommunicationError && error.outcome === "unknown");
-  }
-});
-
 test("Brevo errors expose safe classifications but never the raw provider message or credentials", async () => {
   const cases = [
     { status: 403, body: { code: "permission_denied", message: "PRIVATE key is not authorized" }, expected: "PROVIDER_AUTHENTICATION", outcome: "not-sent" },
     { status: 402, body: { code: "not_enough_credits", message: "PRIVATE credits" }, expected: "PROVIDER_CREDITS", outcome: "not-sent" },
     { status: 400, body: { code: "account_under_validation", message: "PRIVATE account" }, expected: "PROVIDER_ACCOUNT_PENDING", outcome: "not-sent" },
     { status: 400, body: { code: "invalid_parameter", message: "PRIVATE sender domain not verified" }, expected: "PROVIDER_SENDER", outcome: "not-sent" },
-    { status: 400, body: { code: "invalid_parameter", message: "PRIVATE toll-free registration is required" }, expected: "PROVIDER_REGISTRATION", outcome: "not-sent" },
     { status: 429, body: { message: "PRIVATE limit" }, expected: "PROVIDER_RATE_LIMITED", outcome: "not-sent" },
     { status: 400, body: { code: "duplicate_parameter", message: "PRIVATE duplicate" }, expected: "PROVIDER_FAILED", outcome: "unknown" },
     { status: 500, body: { code: "permission_denied", message: "PRIVATE uncertain backend" }, expected: "PROVIDER_FAILED", outcome: "unknown" },
@@ -137,30 +100,12 @@ test("Brevo channels use caller cancellation and the communicator never retries 
   assert.equal(calls, 1);
 });
 
-test("private recipient lists validate all entries, reject duplicates, and support selecting a single channel", () => {
-  assert.deepEqual(readReportRecipients(brevoEnvironment), { email: ["parent@example.test"], sms: ["+12025550123"] });
-  assert.deepEqual(readReportRecipients({ REPORT_EMAIL_RECIPIENTS: " first@example.test, second@example.test " }), {
-    email: ["first@example.test", "second@example.test"], sms: [],
-  });
-  assert.deepEqual(readReportRecipients({ REPORT_EMAIL_RECIPIENTS: "parent@example.test", REPORT_SMS_RECIPIENTS: "invalid" }, "email"), {
-    email: ["parent@example.test"], sms: [],
-  });
-  for (const environment of [
-    { REPORT_EMAIL_RECIPIENTS: "parent@example.test," },
-    { REPORT_EMAIL_RECIPIENTS: "parent@example.test,parent@example.test" },
-    { REPORT_SMS_RECIPIENTS: "7146004407" },
-    { REPORT_SMS_RECIPIENTS: "+12025550123,+12025550123" },
-  ]) assert.throws(() => readReportRecipients(environment), CommunicationError);
-});
-
-test("configuration preserves BREVO_KEY, supports the supplied spelling alias, and isolates optional channels", () => {
-  const configured = createBrevoChannelsFromEnv(brevoEnvironment);
-  assert(configured.email && configured.sms);
+test("email configuration preserves BREVO_KEY and supports the supplied spelling alias", () => {
+  const configured = createBrevoEmailChannelFromEnv(brevoEnvironment);
+  assert(configured instanceof BrevoEmailChannel);
   assert.doesNotMatch(JSON.stringify(configured), /PRIVATE_BREVO_KEY/);
-  assert(createBrevoChannelsFromEnv({ ...brevoEnvironment, BREVO_KEY: undefined, BREVIO_KEY: "PRIVATE_ALIAS" }, ["email"]).email);
-  assert(createBrevoChannelsFromEnv({ BREVO_KEY: "PRIVATE_KEY", BREVO_SMS_SENDER: "+18005550123" }, ["sms"]).sms);
-  assert.throws(() => createBrevoChannelsFromEnv({ ...brevoEnvironment, BREVIO_KEY: "CONFLICTING_KEY" }), CommunicationError);
-  assert.throws(() => createBrevoChannelsFromEnv({ ...brevoEnvironment, BREVO_KEY: "" }), CommunicationError);
-  assert.throws(() => new BrevoSmsChannel({ apiKey: "PRIVATE_KEY", sender: "SchoolHawkAI" }), CommunicationError);
+  assert(createBrevoEmailChannelFromEnv({ ...brevoEnvironment, BREVO_KEY: undefined, BREVIO_KEY: "PRIVATE_ALIAS" }) instanceof BrevoEmailChannel);
+  assert.throws(() => createBrevoEmailChannelFromEnv({ ...brevoEnvironment, BREVIO_KEY: "CONFLICTING_KEY" }), CommunicationError);
+  assert.throws(() => createBrevoEmailChannelFromEnv({ ...brevoEnvironment, BREVO_KEY: "" }), CommunicationError);
   assert.throws(() => new BrevoEmailChannel({ apiKey: "PRIVATE_KEY", senderEmail: "bad\r\nheader@example.test" }), CommunicationError);
 });

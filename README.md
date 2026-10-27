@@ -10,7 +10,7 @@ for the architecture and staged delivery plan.
 - `packages/core`: Zod contracts, deterministic review/change detection, priorities, and source matching.
 - `packages/briefing`: bounded briefing input, full student snapshots, and deterministic text rendering.
 - `packages/agent`: provider-neutral agent interface and the Azure Foundry Responses adapter.
-- `packages/communication`: provider-neutral email/SMS channels, Brevo adapters, and saved-AI-report formatting and dispatch.
+- `packages/communication`: provider-neutral channels, Brevo email and Twilio SMS adapters, and saved-AI-report formatting and dispatch.
 - `packages/storage`: persistence interfaces, SQLite implementation, migrations,
   encryption helpers, and Vitest tests.
 - `config`: public portal URLs.
@@ -117,7 +117,7 @@ Options:
 | --- | --- | --- |
 | `--phase` | `all` | `login`, `collection`, `change-detection` (or `review`), `reporting`, or a comma-separated combination; every collection run logs in first |
 | `--login` | Automatic for collection | Explicitly prepend login to local-only phases; accepted but redundant for `all`/`collection` |
-| `--notify` | Off | Opt in to Azure analysis, encrypted AI-response storage, and Brevo delivery to the private recipient lists; defaults reporting to student-snapshot/JSON |
+| `--notify` | Off | Opt in to Azure analysis, encrypted AI-response storage, Brevo email, and Twilio SMS to the private recipient lists; defaults reporting to student-snapshot/JSON |
 | `--force-report` | Off | With `--notify`, bypass unchanged-input detection and regenerate AI reports |
 | `--config` | `config/review.local.json` | Existing private review configuration; relative paths are repository-root-relative |
 | `--env-file` | Repository-root `.env`, if present | Private dotenv settings; existing exported variables win, and an explicitly selected file must exist |
@@ -170,7 +170,7 @@ Quote passwords that contain `#` (prefer single quotes when possible). An unquot
 `#` starts a dotenv comment, so the parser would otherwise pass only the preceding
 part of the password. Keep explanatory comments on separate lines.
 Only `SKYWARD_`/`CANVAS_` username, password, headed, and success-selector settings,
-plus the Azure Foundry and Brevo settings in `.env.example`, are accepted. Unknown
+plus the Azure Foundry, Brevo email, and Twilio SMS settings in `.env.example`, are accepted. Unknown
 variables, including shell/runtime startup settings such as `BASH_ENV`,
 `NODE_OPTIONS`, and `PATH`, are rejected before any pipeline command runs.
 Help and dry-run never open the environment file.
@@ -184,7 +184,7 @@ that portal without making a login attempt; Ctrl-C stops the pipeline.
 Each login subprocess receives only its matching
 `SKYWARD_USERNAME`/`SKYWARD_PASSWORD` or `CANVAS_USERNAME`/`CANVAS_PASSWORD`.
 File-loaded settings stay in the pipeline process until it exits; the caller's
-shell is not modified. Azure/Brevo credentials and delivery-recipient settings are
+shell is not modified. Azure/Brevo/Twilio credentials and delivery-recipient settings are
 excluded from collector and local-reporting child commands. Only the explicitly
 selected `--notify` reporting coordinator receives the model and delivery settings;
 it never receives portal usernames/passwords.
@@ -684,7 +684,7 @@ node --env-file=.env --import tsx apps/cli/src/index.ts Agent analyze --report /
 Existing report files must be private regular files (`0600`), not symlinks.
 `--config` uses the normal 60-day assignment and 14-day message windows, with
 optional `--assignment-days` / `--message-days` overrides. Existing `--report`
-files retain their own windows. `--notify` opts in to Brevo delivery after saving.
+files retain their own windows. `--notify` opts in to Brevo email and Twilio SMS after saving.
 `--collection-incomplete` conservatively adds an input/response coverage warning;
 the pipeline passes it automatically after any login/collection failure, including
 preflight failures that may be absent from stored collection health.
@@ -913,7 +913,7 @@ const results = await Promise.allSettled([
 Inspect each result separately; a failure on one channel does not prevent the
 other attempt, and a rejection can represent an uncertain delivery outcome.
 
-Brevo adapters implement both channels. Calling an unconfigured channel fails
+Brevo implements email only; Twilio implements SMS. Calling an unconfigured channel fails
 explicitly; there are no production mock-success senders. Approve sender
 identities, recipients, and provider privacy terms before enabling delivery.
 Messages are sent only through explicit communication commands or `--notify`.
@@ -939,32 +939,40 @@ delivery history, transactional outbox/retry handling, quiet hours, and scheduli
 remain later work.
 The SMS reference identifies a report in local storage; it is not a public URL.
 
-### Brevo configuration and recipient lists
+### Brevo email, Twilio SMS, and recipient lists
 
-The adapters use Brevo's fixed HTTPS API endpoints, the `api-key` header, and no
-automatic retries or redirects:
+The adapters use fixed HTTPS endpoints without automatic retries or redirects:
 
-- Email: `POST https://api.brevo.com/v3/smtp/email`, with a verified `sender`, one
-  explicit `to` recipient per request, and the full report in `textContent`.
-- SMS: `POST https://api.brevo.com/v3/transactionalSMS/sms`, as documented in the
-  [API reference](https://developers.brevo.com/reference/send-transac-sms).
-  It sends `type: "transactional"`, the short notice as `content`, and
-  `unicodeEnabled: false`. No STOP code or extra organization prefix is appended,
-  keeping the generated message within its single-segment budget.
+- Brevo email: `POST https://api.brevo.com/v3/smtp/email`, using the `api-key`
+  header, a verified `sender`, one explicit `to` recipient per request, and the
+  full report in `textContent`. See the
+  [email guide](https://developers.brevo.com/docs/send-a-transactional-email).
+- Twilio SMS: `POST https://api.twilio.com/2010-04-01/Accounts/{AccountSid}/Messages.json`,
+  using HTTP Basic authentication (Account SID as username, Auth Token as password).
+  The form-encoded request contains `To`, the short notice in `Body`, and either
+  `From` or `MessagingServiceSid`. See the
+  [Messaging API](https://www.twilio.com/docs/messaging/api/message-resource#create-a-message-resource).
+  Only a valid, matching outgoing Message SID and accepted/queued/sending/sent/delivered
+  status become an acceptance receipt; failed, scheduled, or malformed responses
+  are not treated as successful delivery.
 
-The SMS guide also names a `/send` path; this adapter uses the API-reference path
-and does not automatically switch endpoints or retry a possibly accepted message.
-See the [email guide](https://developers.brevo.com/docs/send-a-transactional-email)
-and [SMS guide](https://developers.brevo.com/docs/transactional-sms-endpoints).
+The provider adapters are exported as `@schoolhawk/communication/brevo`
+(`BrevoEmailChannel`, `createBrevoEmailChannelFromEnv`) and
+`@schoolhawk/communication/twilio` (`TwilioSmsChannel`, `createTwilioSmsChannelFromEnv`).
+Recipient parsing is provider-neutral: `readReportRecipients` is exported from
+`@schoolhawk/communication`.
 
 Keep these settings only in private `.env` or the scheduler's protected environment:
 
 | Variable | Purpose |
 | --- | --- |
-| `BREVO_KEY` | Brevo API key with transactional email/SMS permissions; `BREVIO_KEY` is also accepted, but conflicting values are rejected |
+| `BREVO_KEY` | Brevo API key with transactional email permission; `BREVIO_KEY` is also accepted, but conflicting values are rejected |
 | `BREVO_SENDER_EMAIL` | Email address configured and verified in Brevo |
 | `BREVO_SENDER_NAME` | Email display name; defaults to `SchoolHawkAI` |
-| `BREVO_SMS_SENDER` | Registered SMS Sender ID: 3–11 alphanumeric characters or a numeric sender of up to 15 digits |
+| `TWILIO_ACCOUNT_SID` | Twilio Account SID beginning with `AC`; use this spelling, not `TWILIO_ACCOUND_SID` |
+| `TWILIO_AUTH_TOKEN` | Auth Token for that Twilio account |
+| `TWILIO_FROM_NUMBER` | SMS-capable Twilio sender number belonging to that account, in E.164 format; select this **or** a Messaging Service |
+| `TWILIO_MESSAGING_SERVICE_SID` | Twilio Messaging Service SID beginning with `MG`, with an eligible SMS sender in its sender pool; leave `TWILIO_FROM_NUMBER` blank |
 | `REPORT_EMAIL_RECIPIENTS` | Comma-separated email addresses, up to 20; blank disables email for report delivery |
 | `REPORT_SMS_RECIPIENTS` | Comma-separated E.164 numbers, up to 20; blank disables SMS for report delivery |
 
@@ -973,22 +981,33 @@ and duplicate normalized recipients are rejected. Each recipient receives a sepa
 request, so email recipients are not exposed to one another through a shared To/CC list.
 Destinations are never inferred from AI text.
 
-Brevo requires sender approval. In particular, US/Canada SMS requires an approved
-Sender ID and toll-free registration; adding a label to `.env` does **not** complete
-that registration. Follow [Brevo's registration instructions](https://help.brevo.com/hc/en-us/articles/28255350696466-Register-a-Sender-ID-to-send-SMS-messages).
-Sender/account lookup permissions are not needed by the adapters, but the key must
-authorize the two send endpoints. Credit, permission, sender, and registration
-rejections are reported without logging the provider's raw error body.
+**The Twilio Account SID and Auth Token alone are not enough to send SMS.** You also
+need an SMS-capable Twilio number or a Messaging Service with an eligible sender,
+an allowed recipient/destination, and sufficient account balance. Set exactly one
+sender option; configuring both or neither fails before sending. Trial accounts
+can send only to verified recipients and may prepend trial text, which can increase
+the number of SMS segments beyond the application's 160-character notice.
+See [Twilio trial restrictions](https://www.twilio.com/docs/usage/tutorials/how-to-use-your-free-trial-account).
+Depending on the sender/destination, US messaging requires
+[A2P 10DLC registration](https://www.twilio.com/docs/messaging/compliance/a2p-10dlc)
+or [toll-free verification](https://www.twilio.com/docs/messaging/compliance/toll-free).
+Recipient consent and opt-out requirements still apply; adding credentials does not
+complete registration or override a recipient's opt-out.
 
-An API acceptance receipt can later become an error in Brevo's delivery logs.
-For example, an unverified sender may be accepted by the API and then rejected
-before email delivery. Check the [transactional email logs](https://app.brevo.com/transactional/email/logs),
-validate `BREVO_SENDER_EMAIL` or authenticate its domain, and complete SMS sender
-registration before enabling the daily notification job. The CLI reports provider
-acceptance, not final delivery; it does not yet process delivery webhooks.
+Brevo remains email-only and requires a verified sending email/domain. Remove the
+obsolete `BREVO_SMS_SENDER` setting from private environment files; it is no longer
+supported by the pipeline. No Brevo key is needed for SMS-only commands, and no
+Twilio credentials are needed when SMS is disabled. Authentication, sender,
+registration, rate-limit, and other rejections are explicit and sanitized; raw
+provider errors, phone numbers, and credentials are not logged.
+
+An API acceptance receipt can later become a delivery failure. Check Brevo's
+[transactional email logs](https://app.brevo.com/transactional/email/logs) or Twilio's
+Messaging logs using the returned Message SID. The CLI reports provider acceptance,
+not final inbox/phone delivery; it does not yet process delivery webhooks.
 
 ```bash
-# Inspect the private lists without contacting Brevo.
+# Inspect the private lists without contacting either provider.
 node --env-file=.env --import tsx apps/cli/src/index.ts Communicate recipients
 
 # Send one real test message with harmless content to one explicit destination.
@@ -998,6 +1017,7 @@ node --env-file=.env --import tsx apps/cli/src/index.ts Communicate test --chann
 # Send an already-saved AI report without another Azure call.
 node --env-file=.env --import tsx apps/cli/src/index.ts Communicate send --report <reportId>
 node --env-file=.env --import tsx apps/cli/src/index.ts Communicate send --report <reportId> --channel email
+node --env-file=.env --import tsx apps/cli/src/index.ts Communicate send --report <reportId> --channel sms
 ```
 
 Test messages do not require a database and are not saved as AI reports. Running a
@@ -1008,9 +1028,12 @@ Do not retry an uncertain SMS merely because a command timed out.
 
 Brevo email receives a stable UUID-sized representation of the key in
 `headers.idempotencyKey` to meet its length restriction; its protection
-lasts **15 minutes**, not indefinitely. SMS uses the key as a tracking tag only:
-Brevo does not document equivalent SMS idempotency. These adapters therefore do
-not promise exactly-once delivery or persist a delivery ledger.
+lasts **15 minutes**, not indefinitely. Twilio Message creation has no documented
+idempotency guarantee; the application delivery key remains in local receipts but
+is not sent as an unsupported Twilio parameter/header. Repeated SMS sends can
+create duplicate messages. These adapters do not promise exactly-once delivery
+or persist a delivery ledger; inspect Twilio's Message SID before retrying an
+uncertain request.
 
 ### Daily pipeline command
 
@@ -1037,7 +1060,7 @@ Changed input calls Azure, saves each AI response, and attempts each configured
 email/SMS recipient independently; unchanged input sends only the short notice.
 Collection failures remain warnings in the AI
 input and delivered report and still make the pipeline exit nonzero.
-Default `--phase all` **without** `--notify` does not contact Azure or Brevo.
+Default `--phase all` **without** `--notify` does not contact Azure, Brevo, or Twilio.
 
 No cron/systemd timetable is installed by this option. Configure one scheduling
 authority and do not overlap runs. Each new analysis creates a new report and a

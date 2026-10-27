@@ -26,6 +26,7 @@ const callSchema = z.object({
   headed: z.object({ skyward: z.boolean(), canvas: z.boolean() }),
   azureCredential: z.boolean(),
   brevoCredential: z.boolean(),
+  twilioSettings: z.array(z.string()),
   deliveryRecipients: z.boolean(),
 });
 const noCredentials = {
@@ -63,8 +64,10 @@ const credentialMatches = {
 const headed = { skyward: process.env.SKYWARD_HEADED === "1", canvas: process.env.CANVAS_HEADED === "1" };
 const azureCredential = process.env.AZURE_FOUNDRY_API_KEY !== undefined;
 const brevoCredential = process.env.BREVO_KEY !== undefined || process.env.BREVIO_KEY !== undefined;
+const twilioSettings = ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER", "TWILIO_MESSAGING_SERVICE_SID"]
+  .filter(name => process.env[name] !== undefined);
 const deliveryRecipients = process.env.REPORT_EMAIL_RECIPIENTS !== undefined || process.env.REPORT_SMS_RECIPIENTS !== undefined;
-fs.appendFileSync(process.env.PIPELINE_TEST_TRACE, JSON.stringify({ args, cwd: process.cwd(), credentials, credentialMatches, headed, azureCredential, brevoCredential, deliveryRecipients }) + "\\n", { mode: 0o600 });
+fs.appendFileSync(process.env.PIPELINE_TEST_TRACE, JSON.stringify({ args, cwd: process.cwd(), credentials, credentialMatches, headed, azureCredential, brevoCredential, twilioSettings, deliveryRecipients }) + "\\n", { mode: 0o600 });
 const key = args[1] === "cli" ? args[3] + ":" + args[4] : args[1];
 const failures = JSON.parse(process.env.PIPELINE_TEST_FAILURES || "{}");
 console.log("Synthetic command output");
@@ -236,6 +239,10 @@ test("notification mode uses full snapshot windows, preserves private credential
   const environment = {
     AZURE_FOUNDRY_API_KEY: "PRIVATE_NOTIFY_AZURE_KEY",
     BREVO_KEY: "PRIVATE_NOTIFY_BREVO_KEY",
+    TWILIO_ACCOUNT_SID: "PRIVATE_NOTIFY_TWILIO_SID",
+    TWILIO_AUTH_TOKEN: "PRIVATE_NOTIFY_TWILIO_TOKEN",
+    TWILIO_FROM_NUMBER: "PRIVATE_NOTIFY_TWILIO_NUMBER",
+    TWILIO_MESSAGING_SERVICE_SID: "PRIVATE_NOTIFY_TWILIO_SERVICE",
     REPORT_EMAIL_RECIPIENTS: "parent@example.test",
     REPORT_SMS_RECIPIENTS: "+12025550123",
   };
@@ -247,9 +254,10 @@ test("notification mode uses full snapshot windows, preserves private credential
     assert.deepEqual(result.calls[4].args, ["run", "skyward:messages", "--", "14", "--account", "skyward-fixture", "--all"]);
     assert.deepEqual(result.calls[7].args, ["run", "cli", "--", "Agent", "analyze", "--config", fixture.configuration,
       "--assignment-days", "60", "--message-days", "14", "--per-student", "--notify"]);
-    assert(result.calls.slice(0, 7).every(call => !call.azureCredential && !call.brevoCredential && !call.deliveryRecipients));
+    assert(result.calls.slice(0, 7).every(call => !call.azureCredential && !call.brevoCredential && !call.twilioSettings.length && !call.deliveryRecipients));
     assert.equal(result.calls[7].azureCredential, true);
     assert.equal(result.calls[7].brevoCredential, true);
+    assert.deepEqual(result.calls[7].twilioSettings, ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER", "TWILIO_MESSAGING_SERVICE_SID"]);
     assert.equal(result.calls[7].deliveryRecipients, true);
     assert(Object.values(result.calls[7].credentials).every(value => !value));
     assert.doesNotMatch(result.stdout + result.stderr + readFileSync(fixture.trace, "utf8"), /PRIVATE_NOTIFY_/);
@@ -404,6 +412,8 @@ test("login credentials reach only the relevant login command and never appear i
       CANVAS_USERNAME: "PRIVATE_CANVAS_USER", CANVAS_PASSWORD: "PRIVATE_CANVAS_PASSWORD",
       AZURE_FOUNDRY_API_KEY: "PRIVATE_AZURE_KEY",
       BREVO_KEY: "PRIVATE_BREVO_KEY", REPORT_EMAIL_RECIPIENTS: "PRIVATE_RECIPIENT",
+      TWILIO_ACCOUNT_SID: "PRIVATE_TWILIO_SID", TWILIO_AUTH_TOKEN: "PRIVATE_TWILIO_TOKEN",
+      TWILIO_FROM_NUMBER: "PRIVATE_TWILIO_NUMBER", TWILIO_MESSAGING_SERVICE_SID: "PRIVATE_TWILIO_SERVICE",
       SKYWARD_HEADED: "1", CANVAS_HEADED: "1",
     });
     assert.equal(result.status, 0, result.stderr);
@@ -413,7 +423,7 @@ test("login credentials reach only the relevant login command and never appear i
     assert.equal(result.calls[1].headed.canvas, true);
     assert(result.calls.slice(2).every(call => Object.values(call.credentials).every(present => !present)));
     assert(result.calls.every(call => !call.azureCredential));
-    assert(result.calls.every(call => !call.brevoCredential && !call.deliveryRecipients));
+    assert(result.calls.every(call => !call.brevoCredential && !call.twilioSettings.length && !call.deliveryRecipients));
     assert.doesNotMatch(result.stdout + result.stderr + readFileSync(fixture.trace, "utf8"), /PRIVATE_SKYWARD|PRIVATE_CANVAS|PRIVATE_AZURE/);
     const noLogin = fixture.run(["--phase", "reporting"], {}, { SKYWARD_PASSWORD: "PRIVATE_UNUSED_PASSWORD", CANVAS_PASSWORD: "PRIVATE_UNUSED_PASSWORD" });
     assert.equal(noLogin.status, 0);

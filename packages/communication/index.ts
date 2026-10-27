@@ -74,10 +74,10 @@ const failures = {
   INVALID_RECIPIENT: { outcome: "not-sent", message: "Provide one valid email address or an international E.164 phone number for the selected channel. No message was sent." },
   INVALID_MESSAGE: { outcome: "not-sent", message: "The prepared communication message is invalid or oversized. No content was silently truncated and no message was sent." },
   PROVIDER_REJECTED: { outcome: "not-sent", message: "The provider rejected the message before accepting it. Check the configured provider and recipient." },
-  PROVIDER_AUTHENTICATION: { outcome: "not-sent", message: "The provider rejected the API key or its permissions. Check the key and the required transactional email/SMS API permissions." },
+  PROVIDER_AUTHENTICATION: { outcome: "not-sent", message: "The provider rejected the credentials or their permissions. Check the email API key or SMS account credentials and required permissions." },
   PROVIDER_ACCOUNT_PENDING: { outcome: "not-sent", message: "The provider account is awaiting validation or activation. Complete provider approval before retrying." },
   PROVIDER_CREDITS: { outcome: "not-sent", message: "The provider has insufficient sending credits. Add the required credits before retrying." },
-  PROVIDER_SENDER: { outcome: "not-sent", message: "The provider rejected the sender configuration. Verify the sending email/domain or SMS Sender ID." },
+  PROVIDER_SENDER: { outcome: "not-sent", message: "The provider rejected the sender configuration. Verify the sending email/domain or SMS number/messaging service." },
   PROVIDER_REGISTRATION: { outcome: "not-sent", message: "SMS sender or destination-country registration is not approved. Complete the provider registration process before retrying." },
   PROVIDER_RATE_LIMITED: { outcome: "not-sent", message: "The provider rate limit was reached. No automatic retry was attempted." },
   PROVIDER_FAILED: { outcome: "unknown", message: "The communication provider failed. Delivery may be uncertain; no automatic retry was attempted. Private error details were withheld." },
@@ -93,6 +93,24 @@ export class CommunicationError extends Error {
     this.name = "CommunicationError";
     this.outcome = failures[code].outcome;
   }
+}
+
+export function readReportRecipients(
+  environment: NodeJS.ProcessEnv = process.env, selected: CommunicationChannelName | "all" = "all",
+): ReportRecipients {
+  const list = (value: string | undefined): string[] => {
+    if (value === undefined || !value.trim()) return [];
+    if (Buffer.byteLength(value, "utf8") > 8192) throw new CommunicationError("CONFIGURATION");
+    const parts = value.split(",").map(part => part.trim());
+    if (parts.some(part => !part)) throw new CommunicationError("CONFIGURATION");
+    return parts;
+  };
+  const parsed = reportRecipientsSchema.safeParse({
+    email: selected === "sms" ? [] : list(environment.REPORT_EMAIL_RECIPIENTS),
+    sms: selected === "email" ? [] : list(environment.REPORT_SMS_RECIPIENTS),
+  });
+  if (!parsed.success) throw new CommunicationError("CONFIGURATION");
+  return parsed.data;
 }
 
 function preparationFailure(code: CommunicationErrorCode, channel: CommunicationChannelName): never {

@@ -6,7 +6,7 @@ import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { SqliteReviewStore } from "@schoolhawk/storage/review-sqlite";
 import { environment, foundryResponse, studentReportFixture, studentReportHistoryFixture } from "../../../packages/agent/tests/fixtures";
-import { brevoEnvironment } from "../../../packages/communication/tests/fixtures";
+import { brevoEnvironment, twilioEnvironment, twilioReceipt } from "../../../packages/communication/tests/fixtures";
 import { setupDatabase } from "../../../scripts/setup-database";
 import { runAgentCli } from "../src/agent";
 import { ReportDeliveryError } from "../src/communication";
@@ -19,16 +19,17 @@ function fixture(context: TestContext) {
   context.mock.method(console, "log", (value: string) => output.push(value));
   context.mock.method(console, "error", () => {});
   context.mock.method(globalThis, "fetch", async (url: unknown, options: RequestInit) => {
-    const body = JSON.parse(String(options.body));
+    const sms = String(url).startsWith("https://api.twilio.com/");
+    const body = sms ? Object.fromEntries(new URLSearchParams(String(options.body))) : JSON.parse(String(options.body));
     if (String(url).includes(".services.ai.azure.com/")) {
       state.ai++;
       if (state.aiFailures > 0) { state.aiFailures--; return new Response("{}", { status: 503 }); }
       return new Response(JSON.stringify({ ...foundryResponse("A parent-friendly academic summary."), id: `resp_${state.ai}` }));
     }
-    assert(String(url).startsWith("https://api.brevo.com/v3/"));
-    sent.push({ subject: body.subject, text: body.textContent ?? body.content });
+    assert(String(url).startsWith("https://api.brevo.com/v3/") || sms);
+    sent.push({ subject: body.subject, text: sms ? body.Body : body.textContent });
     if (state.deliveryFails) return new Response("{}", { status: 503 });
-    return new Response(JSON.stringify(body.subject ? { messageId: `<${sent.length}@example.test>` } : { messageId: sent.length }), { status: 201 });
+    return new Response(JSON.stringify(sms ? twilioReceipt() : { messageId: `<${sent.length}@example.test>` }), { status: 201 });
   });
   setupDatabase(root);
   const withStore = <Result>(operation: (store: SqliteReviewStore) => Result): Result => {
@@ -97,6 +98,24 @@ test("unchanged per-student input skips all Azure calls across reopened stores a
   } finally { f.close(); }
 });
 
+test("unchanged student reports can send a short Twilio-only notice without Brevo credentials or another Azure call", async context => {
+  const f = fixture(context);
+  try {
+    const args = ["analyze", "--config", "review.json", "--per-student"];
+    await runAgentCli(args, f.root, f.env);
+    assert.equal(f.state.ai, 2);
+    await runAgentCli([...args, "--notify"], f.root, {
+      ...twilioEnvironment, REPORT_SMS_RECIPIENTS: "+12025550123",
+    });
+    assert.equal(f.state.ai, 2);
+    assert.equal(f.last().kind, "student-report-unchanged");
+    assert.equal(f.sent.length, 1);
+    assert.match(f.sent[0].text, /No new/);
+    assert(f.sent[0].text.length <= 160);
+    assert.doesNotMatch(f.sent[0].text, /avery|casey|academic summary/);
+  } finally { f.close(); }
+});
+
 test("failed student analyses do not advance the successful-batch checkpoint", async context => {
   const f = fixture(context);
   const args = ["analyze", "--config", "review.json", "--per-student"];
@@ -148,7 +167,7 @@ test("delivery failures preserve the paid-for AI checkpoint and unchanged notice
     assert.equal(f.state.ai, 1);
     assert.equal(f.withStore(store => store.listAgentReports().length), 1);
     f.state.deliveryFails = false;
-    await runAgentCli([...args, "--collection-incomplete"], f.root, { ...brevoEnvironment });
+    await runAgentCli([...args, "--collection-incomplete"], f.root, { ...brevoEnvironment, ...twilioEnvironment });
     assert.equal(f.state.ai, 1);
     assert.equal(f.last().kind, "student-report-unchanged");
     assert.equal(f.last().sourceStatus, "limited");
@@ -158,7 +177,7 @@ test("delivery failures preserve the paid-for AI checkpoint and unchanged notice
     assert.match(email.text, /Previous AI report delivery is unconfirmed/);
     assert(f.sent.at(-1)!.text.length <= 160);
     f.state.deliveryFails = true;
-    await assert.rejects(runAgentCli(args, f.root, { ...brevoEnvironment }), ReportDeliveryError);
+    await assert.rejects(runAgentCli(args, f.root, { ...brevoEnvironment, ...twilioEnvironment }), ReportDeliveryError);
     assert.equal(f.state.ai, 1);
     assert.equal(f.last().communication.status, "failed");
   } finally { f.close(); }

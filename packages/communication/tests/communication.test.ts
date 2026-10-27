@@ -7,9 +7,28 @@ import { DiagnosticLogError, withDiagnosticSink, type DiagnosticEvent } from "@s
 import { studentReportFixture } from "../../agent/tests/fixtures";
 import {
   CommunicationError, MAX_EMAIL_BODY_BYTES, MAX_SMS_CHARACTERS, ReportCommunicator,
-  emailMessageSchema, prepareEmailReport, prepareNoChangeNotice, prepareSmsReport, providerReceiptSchema, smsMessageSchema,
+  emailMessageSchema, prepareEmailReport, prepareNoChangeNotice, prepareSmsReport, providerReceiptSchema, readReportRecipients, smsMessageSchema,
   type CommunicationErrorCode, type EmailChannel, type EmailMessage, type ProviderReceipt, type SmsChannel, type SmsMessage,
 } from "../index";
+
+test("private recipient lists are provider-neutral, validate all entries, and isolate selected channels", () => {
+  assert.deepEqual(readReportRecipients({ REPORT_EMAIL_RECIPIENTS: " first@example.test, second@example.test ",
+    REPORT_SMS_RECIPIENTS: "+12025550123" }), {
+    email: ["first@example.test", "second@example.test"], sms: ["+12025550123"],
+  });
+  assert.deepEqual(readReportRecipients({ REPORT_EMAIL_RECIPIENTS: "parent@example.test", REPORT_SMS_RECIPIENTS: "invalid" }, "email"), {
+    email: ["parent@example.test"], sms: [],
+  });
+  assert.deepEqual(readReportRecipients({ REPORT_EMAIL_RECIPIENTS: "invalid", REPORT_SMS_RECIPIENTS: "+12025550123" }, "sms"), {
+    email: [], sms: ["+12025550123"],
+  });
+  for (const environment of [
+    { REPORT_EMAIL_RECIPIENTS: "parent@example.test," },
+    { REPORT_EMAIL_RECIPIENTS: "parent@example.test,parent@example.test" },
+    { REPORT_SMS_RECIPIENTS: "7146004407" },
+    { REPORT_SMS_RECIPIENTS: "+12025550123,+12025550123" },
+  ]) assert.throws(() => readReportRecipients(environment), CommunicationError);
+});
 
 function report(overrides: Partial<StoredAgentReport> = {}): StoredAgentReport {
   const source = studentReportFixture();

@@ -1,15 +1,16 @@
 import { randomBytes } from "node:crypto";
 import { parseArgs } from "node:util";
 import {
-  CommunicationError, ReportCommunicator, communicationMessageSchema, prepareNoChangeNotice,
-  type CommunicationChannelName, type CommunicationReceipt, type NoChangeNotice, type ReportRecipients,
+  CommunicationError, ReportCommunicator, communicationMessageSchema, prepareNoChangeNotice, readReportRecipients,
+  type CommunicationChannelName, type CommunicationChannels, type CommunicationReceipt, type NoChangeNotice, type ReportRecipients,
 } from "@schoolhawk/communication";
-import { createBrevoChannelsFromEnv, readReportRecipients } from "@schoolhawk/communication/brevo";
+import { createBrevoEmailChannelFromEnv } from "@schoolhawk/communication/brevo";
+import { createTwilioSmsChannelFromEnv } from "@schoolhawk/communication/twilio";
 import { agentReportIdSchema, type StoredAgentReport } from "@schoolhawk/core/agent-reports";
 import { withReviewStore } from "@schoolhawk/storage/review-sqlite";
 import { DiagnosticLogError } from "@schoolhawk/core/diagnostics";
 
-const HELP = `Brevo report delivery (explicit external email/SMS transmission)
+const HELP = `Report delivery: Brevo email and Twilio SMS (explicit external transmission)
 
   Communicate recipients [--channel email|sms|all]
   Communicate send --report <saved-report-id> [--channel email|sms|all]
@@ -18,7 +19,9 @@ const HELP = `Brevo report delivery (explicit external email/SMS transmission)
 
 BREVO_KEY is the API key; BREVIO_KEY is accepted as a compatibility alias.
 Email needs BREVO_SENDER_EMAIL and optional BREVO_SENDER_NAME.
-SMS needs BREVO_SMS_SENDER, approved by Brevo for the destination country.
+SMS needs TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and exactly one sender:
+TWILIO_FROM_NUMBER (SMS-capable Twilio number in E.164 format) or TWILIO_MESSAGING_SERVICE_SID.
+Trial accounts require verified recipients; destination-country sender registration may apply.
 REPORT_EMAIL_RECIPIENTS and REPORT_SMS_RECIPIENTS are comma-separated private lists.
 SMS recipients must use E.164 format, for example +12025550123.
 
@@ -28,10 +31,17 @@ test sends one harmless test message to the explicit recipient, not the whole li
 No real student data or database is needed for test.
 Provider acceptance is not confirmed delivery. Failures/uncertain outcomes are explicit.
 There are no automatic retries; Brevo email idempotency lasts only 15 minutes.
-SMS tags are for tracking, not a promise of deduplication.
+Twilio SMS creation has no documented idempotency guarantee; repeated sends can duplicate messages.
 `;
 
 export class CommunicationUsageError extends Error {}
+
+function createChannelsFromEnv(environment: NodeJS.ProcessEnv, selected: readonly CommunicationChannelName[]): CommunicationChannels {
+  const channels: CommunicationChannels = {};
+  if (selected.includes("email")) channels.email = createBrevoEmailChannelFromEnv(environment);
+  if (selected.includes("sms")) channels.sms = createTwilioSmsChannelFromEnv(environment);
+  return channels;
+}
 
 export interface ReportDeliveryPlan {
   communicator: ReportCommunicator;
@@ -59,7 +69,7 @@ export function prepareReportDelivery(
   if (recipients.email.length) channels.push("email");
   if (recipients.sms.length) channels.push("sms");
   if (!channels.length) throw new CommunicationUsageError("No recipients are configured for the selected channels. Set the private REPORT_EMAIL_RECIPIENTS and/or REPORT_SMS_RECIPIENTS lists.");
-  return { recipients, communicator: new ReportCommunicator(createBrevoChannelsFromEnv(environment, channels)) };
+  return { recipients, communicator: new ReportCommunicator(createChannelsFromEnv(environment, channels)) };
 }
 
 export async function deliverReport(report: StoredAgentReport, plan: ReportDeliveryPlan): Promise<ReportDeliveryResult> {
@@ -124,13 +134,13 @@ export async function runCommunicationCli(args: string[], root: string, environm
     return;
   }
   if (input.command === "test") {
-    const communicator = new ReportCommunicator(createBrevoChannelsFromEnv(environment, [input.channel]));
+    const communicator = new ReportCommunicator(createChannelsFromEnv(environment, [input.channel]));
     const parsed = communicationMessageSchema.safeParse({
       channel: input.channel, to: input.to, reportId: `report_${randomBytes(32).toString("hex")}`,
       idempotencyKey: `delivery_${randomBytes(32).toString("hex")}`,
       ...(input.channel === "email" ? { subject: "SchoolHawkAI test email",
         text: "This is your requested SchoolHawkAI transactional email test through Brevo. No student records are included." }
-        : { text: "SchoolHawkAI: This is your requested Brevo SMS test. No student records are included." }),
+        : { text: "SchoolHawkAI: This is your requested Twilio SMS test. No student records are included." }),
     });
     if (!parsed.success) throw new CommunicationUsageError("Use one valid email address or an E.164 phone number for the selected test channel. No test message was sent.");
     console.error(`COMMUNICATION: Sending one requested test ${input.channel}; no student data is included.`);

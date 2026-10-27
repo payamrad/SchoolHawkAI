@@ -11,8 +11,8 @@ Usage: bash scripts/run-pipeline.sh [options]
                      Order: login -> collection -> change-detection -> reporting.
                      all and collection always log in first.
   --login            Also log in for local-only phases; collection already requires login.
-  --notify           Opt in to Azure analysis, encrypted response storage, and Brevo
-                     email/SMS delivery during reporting. Uses student-snapshot/JSON.
+  --notify           Opt in to Azure analysis, encrypted response storage, Brevo email,
+                     and Twilio SMS during reporting. Uses student-snapshot/JSON.
   --force-report     With --notify, generate AI reports even if school data is unchanged.
   --config <path>     Private review JSON (default: config/review.local.json).
                      Relative paths are resolved from the repository root.
@@ -59,7 +59,8 @@ for --assignment-days and all messages for --message-days to populate the report
 No school-year start date is needed. --days affects collection, not report filtering.
 Without --notify, reporting is the local summary/input, NOT a hosted AI report.
 --notify instead runs Agent analyze --per-student --notify with the selected windows.
-It sends private school data to Azure and sends the saved AI report through Brevo.
+It sends private school data to Azure, emails saved AI reports through Brevo,
+and sends short report-ready SMS notices through Twilio.
 Unchanged report input skips Azure and sends a short no-new-data notice instead.
 Use --force-report after changing the Azure prompt or to explicitly regenerate.
 Pipeline collection failures are carried into the AI input and delivery warnings.
@@ -210,7 +211,8 @@ portal_access=$collection
 [[ "$login" != true ]] || portal_access=true
 if ! plan=$(
 unset SKYWARD_USERNAME SKYWARD_PASSWORD CANVAS_USERNAME CANVAS_PASSWORD AZURE_FOUNDRY_API_KEY
-unset BREVO_KEY BREVIO_KEY BREVO_SENDER_EMAIL BREVO_SENDER_NAME BREVO_SMS_SENDER REPORT_EMAIL_RECIPIENTS REPORT_SMS_RECIPIENTS
+unset BREVO_KEY BREVIO_KEY BREVO_SENDER_EMAIL BREVO_SENDER_NAME REPORT_EMAIL_RECIPIENTS REPORT_SMS_RECIPIENTS
+unset TWILIO_ACCOUNT_SID TWILIO_AUTH_TOKEN TWILIO_FROM_NUMBER TWILIO_MESSAGING_SERVICE_SID
 node --import tsx - "$config" "$portal_access" <<'NODE'
 let ReviewUsageError;
 try {
@@ -338,7 +340,8 @@ run_command() {
     set +x
     if [[ "$label" != reporting/agent ]]; then
       unset AZURE_FOUNDRY_API_KEY BREVO_KEY BREVIO_KEY
-      unset BREVO_SENDER_EMAIL BREVO_SENDER_NAME BREVO_SMS_SENDER REPORT_EMAIL_RECIPIENTS REPORT_SMS_RECIPIENTS
+      unset BREVO_SENDER_EMAIL BREVO_SENDER_NAME REPORT_EMAIL_RECIPIENTS REPORT_SMS_RECIPIENTS
+      unset TWILIO_ACCOUNT_SID TWILIO_AUTH_TOKEN TWILIO_FROM_NUMBER TWILIO_MESSAGING_SERVICE_SID
     fi
     case "$label" in
       login/skyward)
