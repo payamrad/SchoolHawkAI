@@ -135,14 +135,14 @@ test("migration, rollback, encrypted backup and append-only review history prese
     store.close();
     let connection = new Database(file);
     const original = connection.prepare("SELECT content_hash, payload FROM assignment_runs").all();
-    connection.exec("DROP TABLE agent_reports; DROP TABLE review_evaluations; DROP TABLE review_events; DROP TABLE review_profiles; PRAGMA user_version = 6;");
+    connection.exec("DROP TABLE report_checkpoints; DROP TABLE agent_reports; DROP TABLE review_evaluations; DROP TABLE review_events; DROP TABLE review_profiles; PRAGMA user_version = 6;");
     assert.throws(() => new SqliteReviewStore(file, randomBytes(32)), /Incorrect storage key/);
     assert.equal(connection.pragma("user_version", { simple: true }), 6);
     connection.close();
     store = new SqliteReviewStore(file, key);
     connection = new Database(file);
     try {
-      assert.equal(connection.pragma("user_version", { simple: true }), 8);
+      assert.equal(connection.pragma("user_version", { simple: true }), 9);
       assert.deepEqual(connection.prepare("SELECT content_hash, payload FROM assignment_runs").all(), original);
       connection.exec("CREATE TRIGGER fail_review BEFORE INSERT ON review_evaluations BEGIN SELECT RAISE(ABORT, 'Synthetic review failure'); END;");
       assert.throws(() => store.processReview(config(), new Date(instant)), /Synthetic review failure/);

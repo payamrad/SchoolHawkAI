@@ -5,7 +5,7 @@ export const endpoint = "https://fixture.services.ai.azure.com/api/projects/test
 export const apiKey = "PRIVATE_AGENT_KEY_FOR_FIXTURES";
 export const environment = { AZURE_FOUNDRY_AGENT_ENDPOINT: endpoint, AZURE_FOUNDRY_API_KEY: apiKey };
 
-export function studentReportFixture() {
+export function studentReportHistoryFixture() {
   const { settings, history, skyward } = namedFamilyFixture();
   settings.sources[0].sections.push("grades", "messages");
   const grades = gradeRun();
@@ -17,6 +17,11 @@ export function studentReportFixture() {
   }));
   history.push({ portal: "skyward", section: "grades", accountId: "parent", run: grades },
     { portal: "skyward", section: "messages", accountId: "parent", run: messageRun() });
+  return { settings, history, skyward, grades };
+}
+
+export function studentReportFixture() {
+  const { settings, history } = studentReportHistoryFixture();
   return buildStudentSnapshot(history, settings, snapshotReview(history, settings), { courses: [], assignments: [] }, ids);
 }
 

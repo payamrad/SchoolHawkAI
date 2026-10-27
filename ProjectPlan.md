@@ -177,8 +177,10 @@ The pipeline imports a private repository-root `.env` before actual execution,
 or a selected `--env-file`, using dotenv parsing rather than shell evaluation.
 Existing exported settings win. Help/dry-run do not read credentials; unsafe or
 unsupported environment files stop execution before login. Only the matching
-portal credentials reach each login subprocess, and Azure credentials are excluded
-from the current collection/local-reporting commands. Scheduled-service secret
+portal credentials reach each login subprocess. Azure/Brevo credentials and
+recipient settings are excluded from collection/local-reporting commands; the
+explicit notification coordinator receives only its model/delivery settings.
+Scheduled-service secret
 storage, run locking, and daily scheduling remain separate deployment work.
 
 Before generating sensitive artifacts, ignore `.env` files except sanitized examples, `.auth` directories, local data, snapshots, screenshots, traces, downloads, database files including WAL/SHM files, and browser profiles. Ignore rules do not remove files already tracked by Git; verify tracked files as well.
@@ -331,6 +333,32 @@ Urgent notifications use configurable quiet-hour exceptions, deduplication, and 
 
 Provide a deterministic template-based briefing when the model is offline. Collection, changes, priority rules, and approved urgent notifications must continue without an LLM.
 
+The provider-neutral communication interface now exposes separate email and SMS
+channels for saved AI reports. The Azure-managed prompt in `Prompt.txt` requests
+three parent-facing analytical paragraphs covering strengths worth recognizing,
+missing work and declining/low grades, and practical support, followed by summaries
+of all newly captured or substantively updated messages. Missing assignments are
+prominent and are not omitted to meet the normal length target. The prompt must
+be updated in Azure separately; the application does not override it.
+Email preparation preserves prose and source warnings, extracts validated
+parent-facing bodies from matching legacy JSON envelopes, and rejects malformed
+or unrecognized structured output instead of emailing raw JSON. This is formatting,
+not fact-checking of the AI's conclusions. SMS preparation produces a bounded notification
+and local report reference without names or grades. Destinations are explicit
+application inputs, never model-selected. Channel adapters return acceptance
+receipts; unknown outcomes remain explicit and are not automatically retried.
+Brevo email/SMS adapters and private recipient lists are now implemented, with
+explicit test/send commands and an opt-in `--notify` pipeline path. Sender approval,
+US SMS registration, sufficient credits, durable delivery/outbox state, quiet hours,
+and scheduled-dispatch acceptance gates remain to be completed or verified.
+
+The notification pipeline generates one student-scoped AI report and email per
+configured, named child. Source record IDs and grade histories remain intact,
+shared account context stays explicitly qualified, and student names are retained
+in encrypted AI-report metadata and deterministic email headings. Empty SMS
+recipient lists disable that channel. Per-student failures remain visible without
+preventing independent student reports from completing.
+
 ### Provider-Neutral Briefing Input (Implemented Local Slice)
 
 The deterministic review engine and briefing-input builder have no model/provider
@@ -472,7 +500,21 @@ and provenance transactionally as encrypted, append-only `agent_reports`.
 response before reporting success; `Agent reports` and `Agent report` inspect
 saved results without model credentials. Duplicate response saves are idempotent,
 and storage failures remain explicit. This is not yet source-grounded validation
-of AI conclusions, context-aware partitioning, or delivery.
+of AI conclusions or context-aware partitioning. Explicit Brevo delivery now follows
+successful local persistence when requested; delivery failures do not discard the
+saved AI response.
+
+Implemented token-saving comparison: before Azure is initialized, `Agent analyze`
+hashes canonical report input, retaining selected school facts and value history
+but excluding volatile run timestamps, evidence IDs and repeated observation counts.
+Migration 009 stores encrypted checkpoints after the complete AI report batch has
+been saved. Equal hashes skip the entire AI batch; opt-in notification sends a small
+deterministic no-new-data notice instead, retaining coverage and previous-delivery
+warnings and never implying missing work is resolved. Failed analysis/storage
+does not advance the checkpoint. Delivery failure preserves the paid-for reports.
+Changed selected data, rules or scope regenerate reports; `--force` (pipeline
+`--force-report`) supports deliberate regeneration after remote prompt changes.
+This comparison is not a cross-run lock or a durable notification outbox.
 
 Exit gate: agent cannot obtain secrets, browse arbitrarily, run arbitrary commands, or mutate portal data; actionable claims reference known evidence; model failures do not break collection or deterministic alerts.
 

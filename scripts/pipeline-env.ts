@@ -8,6 +8,8 @@ const variables = new Set([
   "CANVAS_USERNAME", "CANVAS_PASSWORD", "CANVAS_HEADED", "CANVAS_SUCCESS_SELECTOR",
   "AZURE_FOUNDRY_AGENT_ENDPOINT", "AZURE_FOUNDRY_API_KEY", "AZURE_FOUNDRY_API_VERSION",
   "AZURE_FOUNDRY_TIMEOUT_MS", "AZURE_FOUNDRY_MAX_REQUEST_BYTES",
+  "BREVO_KEY", "BREVIO_KEY", "BREVO_SENDER_EMAIL", "BREVO_SENDER_NAME", "BREVO_SMS_SENDER",
+  "REPORT_EMAIL_RECIPIENTS", "REPORT_SMS_RECIPIENTS",
 ]);
 
 export class PipelineEnvironmentError extends Error {}
@@ -38,7 +40,7 @@ export function readPipelineEnvironment(file: string, existing: NodeJS.ProcessEn
   for (const [name, value] of Object.entries(parsed)) {
     if (!variables.has(name) || typeof value !== "string" || value.includes("\0")) {
       throw new PipelineEnvironmentError(
-        "Unsupported environment variable or value. Only documented Skyward, Canvas, and Azure Foundry settings are accepted; " +
+        "Unsupported environment variable or value. Only documented Skyward, Canvas, Azure Foundry, and Brevo settings are accepted; " +
         "shell/runtime startup variables are not allowed. No values were loaded.",
       );
     }

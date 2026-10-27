@@ -25,6 +25,8 @@ const callSchema = z.object({
   credentialMatches: z.object({ skywardUsername: z.boolean(), skywardPassword: z.boolean(), canvasUsername: z.boolean(), canvasPassword: z.boolean() }),
   headed: z.object({ skyward: z.boolean(), canvas: z.boolean() }),
   azureCredential: z.boolean(),
+  brevoCredential: z.boolean(),
+  deliveryRecipients: z.boolean(),
 });
 const noCredentials = {
   SKYWARD_USERNAME: undefined, SKYWARD_PASSWORD: undefined, CANVAS_USERNAME: undefined, CANVAS_PASSWORD: undefined,
@@ -60,8 +62,10 @@ const credentialMatches = {
 };
 const headed = { skyward: process.env.SKYWARD_HEADED === "1", canvas: process.env.CANVAS_HEADED === "1" };
 const azureCredential = process.env.AZURE_FOUNDRY_API_KEY !== undefined;
-fs.appendFileSync(process.env.PIPELINE_TEST_TRACE, JSON.stringify({ args, cwd: process.cwd(), credentials, credentialMatches, headed, azureCredential }) + "\\n", { mode: 0o600 });
-const key = args[1] === "cli" ? "Review:" + args[4] : args[1];
+const brevoCredential = process.env.BREVO_KEY !== undefined || process.env.BREVIO_KEY !== undefined;
+const deliveryRecipients = process.env.REPORT_EMAIL_RECIPIENTS !== undefined || process.env.REPORT_SMS_RECIPIENTS !== undefined;
+fs.appendFileSync(process.env.PIPELINE_TEST_TRACE, JSON.stringify({ args, cwd: process.cwd(), credentials, credentialMatches, headed, azureCredential, brevoCredential, deliveryRecipients }) + "\\n", { mode: 0o600 });
+const key = args[1] === "cli" ? args[3] + ":" + args[4] : args[1];
 const failures = JSON.parse(process.env.PIPELINE_TEST_FAILURES || "{}");
 console.log("Synthetic command output");
 process.exit(failures[key] || 0);
@@ -227,6 +231,54 @@ test("the default dotenv path is repository-root-relative and an absent default 
   } finally { fixture.close(); }
 });
 
+test("notification mode uses full snapshot windows, preserves private credential boundaries, and carries collection failures", execution, () => {
+  const fixture = harness();
+  const environment = {
+    AZURE_FOUNDRY_API_KEY: "PRIVATE_NOTIFY_AZURE_KEY",
+    BREVO_KEY: "PRIVATE_NOTIFY_BREVO_KEY",
+    REPORT_EMAIL_RECIPIENTS: "parent@example.test",
+    REPORT_SMS_RECIPIENTS: "+12025550123",
+  };
+  try {
+    const result = fixture.run(["--notify"], {}, environment);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.calls.length, 8);
+    assert.deepEqual(result.calls[2].args, ["run", "skyward:assignments", "--", "60", "--account", "skyward-fixture"]);
+    assert.deepEqual(result.calls[4].args, ["run", "skyward:messages", "--", "14", "--account", "skyward-fixture", "--all"]);
+    assert.deepEqual(result.calls[7].args, ["run", "cli", "--", "Agent", "analyze", "--config", fixture.configuration,
+      "--assignment-days", "60", "--message-days", "14", "--per-student", "--notify"]);
+    assert(result.calls.slice(0, 7).every(call => !call.azureCredential && !call.brevoCredential && !call.deliveryRecipients));
+    assert.equal(result.calls[7].azureCredential, true);
+    assert.equal(result.calls[7].brevoCredential, true);
+    assert.equal(result.calls[7].deliveryRecipients, true);
+    assert(Object.values(result.calls[7].credentials).every(value => !value));
+    assert.doesNotMatch(result.stdout + result.stderr + readFileSync(fixture.trace, "utf8"), /PRIVATE_NOTIFY_/);
+
+    const partial = fixture.run(["--notify"], { "skyward:grades": 1 }, environment);
+    assert.equal(partial.status, 1);
+    assert(partial.calls.at(-1)!.args.includes("--collection-incomplete"));
+    const failedReview = fixture.run(["--notify"], { "Review:run": 1 }, environment);
+    assert.equal(failedReview.status, 1);
+    assert(failedReview.calls.every(call => !call.args.includes("Agent")));
+    const failedDelivery = fixture.run(["--phase", "reporting", "--notify"], { "Agent:analyze": 1 }, environment);
+    assert.equal(failedDelivery.status, 1);
+    assert.match(failedDelivery.stderr, /reporting\/agent \(exit 1\)/);
+  } finally { fixture.close(); }
+});
+
+test("notification dry-run does not read credentials and custom report windows reach the AI reporting step", () => {
+  const fixture = harness();
+  try {
+    rmSync(fixture.environmentFile);
+    const result = fixture.run(["--notify", "--force-report", "--assignment-days", "90", "--message-days", "21", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.calls, []);
+    assert.match(result.stderr, /Agent analyze .*--assignment-days 90 --message-days 21 --per-student --notify --force/);
+    assert.match(result.stderr, /skyward:assignments -- 90/);
+    assert.match(result.stderr, /skyward:messages -- 21/);
+  } finally { fixture.close(); }
+});
+
 test("pipeline help and argument validation need no configuration, database or portal access", () => {
   const fixture = harness();
   try {
@@ -245,6 +297,9 @@ test("pipeline help and argument validation need no configuration, database or p
       ["--assignment-days", "60"], ["--report-type", "student-snapshot", "--assignment-days", "0"],
       ["--report-type", "student-snapshot", "--message-days", "367"],
       ["--env-file"], ["--env-file="], ["--env-file", "a", "--env-file", "b"],
+      ["--notify", "--notify"], ["--notify", "--phase", "login"], ["--notify", "--report-type", "briefing"],
+      ["--notify", "--format", "text"],
+      ["--force-report"], ["--notify", "--force-report", "--force-report"],
     ]) {
       const result = fixture.run(args);
       assert.equal(result.status, 1, args.join(" "));
@@ -348,6 +403,7 @@ test("login credentials reach only the relevant login command and never appear i
       SKYWARD_USERNAME: "PRIVATE_SKYWARD_USER", SKYWARD_PASSWORD: "PRIVATE_SKYWARD_PASSWORD",
       CANVAS_USERNAME: "PRIVATE_CANVAS_USER", CANVAS_PASSWORD: "PRIVATE_CANVAS_PASSWORD",
       AZURE_FOUNDRY_API_KEY: "PRIVATE_AZURE_KEY",
+      BREVO_KEY: "PRIVATE_BREVO_KEY", REPORT_EMAIL_RECIPIENTS: "PRIVATE_RECIPIENT",
       SKYWARD_HEADED: "1", CANVAS_HEADED: "1",
     });
     assert.equal(result.status, 0, result.stderr);
@@ -357,6 +413,7 @@ test("login credentials reach only the relevant login command and never appear i
     assert.equal(result.calls[1].headed.canvas, true);
     assert(result.calls.slice(2).every(call => Object.values(call.credentials).every(present => !present)));
     assert(result.calls.every(call => !call.azureCredential));
+    assert(result.calls.every(call => !call.brevoCredential && !call.deliveryRecipients));
     assert.doesNotMatch(result.stdout + result.stderr + readFileSync(fixture.trace, "utf8"), /PRIVATE_SKYWARD|PRIVATE_CANVAS|PRIVATE_AZURE/);
     const noLogin = fixture.run(["--phase", "reporting"], {}, { SKYWARD_PASSWORD: "PRIVATE_UNUSED_PASSWORD", CANVAS_PASSWORD: "PRIVATE_UNUSED_PASSWORD" });
     assert.equal(noLogin.status, 0);

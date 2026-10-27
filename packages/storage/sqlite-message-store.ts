@@ -37,7 +37,7 @@ export class SqliteMessageStore implements MessageStore, AssignmentStore, GradeS
       this.database.pragma("busy_timeout = 5000");
       this.database.transaction(() => {
         const version = this.database.pragma("user_version", { simple: true });
-        if (typeof version !== "number" || ![0, 1, 2, 3, 4, 5, 6, 7, 8].includes(version)) {
+        if (typeof version !== "number" || ![0, 1, 2, 3, 4, 5, 6, 7, 8, 9].includes(version)) {
           reportDiagnostic({ level: "error", code: "STORAGE_SCHEMA_UNSUPPORTED", section: "storage", stage: "DATABASE_OPEN" });
           throw new Error("Unsupported database schema version.");
         }
@@ -78,6 +78,10 @@ export class SqliteMessageStore implements MessageStore, AssignmentStore, GradeS
         if (version < 8) {
           this.database.exec(readFileSync(path.join(__dirname, "migrations/008-agent-reports.sql"), "utf8"));
           this.database.pragma("user_version = 8");
+        }
+        if (version < 9) {
+          this.database.exec(readFileSync(path.join(__dirname, "migrations/009-report-checkpoints.sql"), "utf8"));
+          this.database.pragma("user_version = 9");
         }
       }).immediate();
       this.database.pragma("journal_mode = WAL");

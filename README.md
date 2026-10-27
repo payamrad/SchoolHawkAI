@@ -10,6 +10,7 @@ for the architecture and staged delivery plan.
 - `packages/core`: Zod contracts, deterministic review/change detection, priorities, and source matching.
 - `packages/briefing`: bounded briefing input, full student snapshots, and deterministic text rendering.
 - `packages/agent`: provider-neutral agent interface and the Azure Foundry Responses adapter.
+- `packages/communication`: provider-neutral email/SMS channels, Brevo adapters, and saved-AI-report formatting and dispatch.
 - `packages/storage`: persistence interfaces, SQLite implementation, migrations,
   encryption helpers, and Vitest tests.
 - `config`: public portal URLs.
@@ -116,6 +117,8 @@ Options:
 | --- | --- | --- |
 | `--phase` | `all` | `login`, `collection`, `change-detection` (or `review`), `reporting`, or a comma-separated combination; every collection run logs in first |
 | `--login` | Automatic for collection | Explicitly prepend login to local-only phases; accepted but redundant for `all`/`collection` |
+| `--notify` | Off | Opt in to Azure analysis, encrypted AI-response storage, and Brevo delivery to the private recipient lists; defaults reporting to student-snapshot/JSON |
+| `--force-report` | Off | With `--notify`, bypass unchanged-input detection and regenerate AI reports |
 | `--config` | `config/review.local.json` | Existing private review configuration; relative paths are repository-root-relative |
 | `--env-file` | Repository-root `.env`, if present | Private dotenv settings; existing exported variables win, and an explicitly selected file must exist |
 | `--days` | `7` for briefing runs | Override both Skyward collection windows; snapshot runs otherwise use their separate assignment/message windows |
@@ -163,8 +166,11 @@ The file must be a private regular file owned by the app user (`0600`), not a
 symlink, and at most 100 KB. Parsing uses Node's dotenv syntax, not shell
 evaluation or variable expansion. Quoted spaces, multiline values, and literal
 `$`/command-substitution text are preserved without execution or tracing.
+Quote passwords that contain `#` (prefer single quotes when possible). An unquoted
+`#` starts a dotenv comment, so the parser would otherwise pass only the preceding
+part of the password. Keep explanatory comments on separate lines.
 Only `SKYWARD_`/`CANVAS_` username, password, headed, and success-selector settings,
-plus the five Azure Foundry settings in `.env.example`, are accepted. Unknown
+plus the Azure Foundry and Brevo settings in `.env.example`, are accepted. Unknown
 variables, including shell/runtime startup settings such as `BASH_ENV`,
 `NODE_OPTIONS`, and `PATH`, are rejected before any pipeline command runs.
 Help and dry-run never open the environment file.
@@ -178,8 +184,10 @@ that portal without making a login attempt; Ctrl-C stops the pipeline.
 Each login subprocess receives only its matching
 `SKYWARD_USERNAME`/`SKYWARD_PASSWORD` or `CANVAS_USERNAME`/`CANVAS_PASSWORD`.
 File-loaded settings stay in the pipeline process until it exits; the caller's
-shell is not modified. The Azure API key is excluded from every current pipeline
-child command, since the pipeline still performs no AI calls.
+shell is not modified. Azure/Brevo credentials and delivery-recipient settings are
+excluded from collector and local-reporting child commands. Only the explicitly
+selected `--notify` reporting coordinator receives the model and delivery settings;
+it never receives portal usernames/passwords.
 Prompted credentials disappear when that process exits and are never saved to
 files, added to command arguments, or exported into your parent shell. Other portal
 credentials are excluded, as are all credentials from configuration preflight,
@@ -211,6 +219,12 @@ review/reporting may still combine multiple previously collected accounts.
 also reevaluates local changes/priorities and saves an evaluation even when selected
 alone. It is the **current model-free summary or structured AI input**, not an Azure
 report, and it performs no email/SMS delivery.
+The exception is explicit `--notify`: reporting instead invokes
+`Agent analyze --per-student --notify`, using the selected assignment/message windows,
+generating and saving a separate named AI response for each configured child before
+attempting email/SMS delivery. Without explicit report-type or
+format flags, notification mode selects `student-snapshot` and JSON so collection
+lookbacks match the AI input. Conflicting briefing/text selections are rejected.
 With `--report-type student-snapshot`, reporting calls `Review snapshot` instead.
 That report includes recent assignment details, all grades, and new/recent messages.
 Snapshot pipelines default to collecting 60 days of past assignments and **all**
@@ -585,6 +599,13 @@ Programmatic callers can use
 are exported by `@schoolhawk/core/student-snapshot`; text rendering is available
 from `@schoolhawk/briefing/student-snapshot`. The builder accepts typed history and
 review input and is independent of Azure, OpenClaw, or a delivery provider.
+
+An optional `studentRef` in snapshot options scopes the source history to one
+configured child and that child's bound accounts. Assignment/grade histories,
+provenance, and exclusion counts are computed within that scope rather than
+splitting unstructured AI text afterward. Shared account messages remain explicitly
+account-wide, and unassigned family collection-health warnings remain visible.
+The selected reference is recorded in `selection.studentRef`.
 For name-matched input, use a review containing its `resolvedChildren`; the pure
 builder rejects missing or mismatched resolution metadata instead of regrouping
 the snapshot differently from its review. Name resolution reads retained student
@@ -629,8 +650,8 @@ node --env-file=.env --import tsx apps/cli/src/index.ts Agent test
 `.env` is ignored by Git. Do not put credentials in command-line arguments,
 review configuration, report JSON, or source code. The direct CLI does not automatically
 load environment files; Node's `--env-file` above applies only to that process.
-The Bash pipeline loads `.env` itself for its own steps, but still does not invoke
-the agent. With
+The Bash pipeline loads `.env` itself and invokes the agent only with explicit
+`--notify`. With
 credentials already supplied by a secret manager or environment, use:
 
 ```bash
@@ -650,7 +671,7 @@ API keys; this connector reports that failure rather than switching endpoints.
 
 **These commands explicitly send private educational data to Azure.** Approve the
 provider, fields, and retention terms before using real records. Regular `Review`
-commands and the existing pipeline remain local; they do not call the agent.
+commands and pipeline runs without `--notify` remain local.
 
 ```bash
 # Generate the current name-matched snapshot, send it, and save the AI response.
@@ -661,20 +682,87 @@ node --env-file=.env --import tsx apps/cli/src/index.ts Agent analyze --report /
 ```
 
 Existing report files must be private regular files (`0600`), not symlinks.
-`--config` uses the normal 60-day assignment and 14-day message windows; use
-`Review snapshot` to prepare different windows before choosing `--report`.
+`--config` uses the normal 60-day assignment and 14-day message windows, with
+optional `--assignment-days` / `--message-days` overrides. Existing `--report`
+files retain their own windows. `--notify` opts in to Brevo delivery after saving.
+`--collection-incomplete` conservatively adds an input/response coverage warning;
+the pipeline passes it automatically after any login/collection failure, including
+preflight failures that may be absent from stored collection health.
 CLI responses are JSON and may contain private AI-generated text.
+With `Agent analyze --config ... --per-student`, each configured, named student gets
+an individual input snapshot, AI response, and saved report. With `--notify`, each
+saved report is emailed separately. The pipeline's `--notify` path selects this
+mode automatically. Student names are carried as explicit metadata rather than
+inferred from AI text. Unmapped or numbered-placeholder names stop the batch before
+any model request.
+
+Per-student mode requires `--config`, not an external multi-student report file.
+It returns a `student-report-batch` containing saved reports and per-student
+failures. Independent students are still attempted after a model/delivery failure;
+the command exits nonzero if any report or delivery failed. Inspect the results
+before retrying so already-delivered emails are not duplicated.
 Both analysis modes require the existing local database and its original encryption
 key. Storage is opened and validated before the request is sent. The database
 connection remains available, but no SQL transaction or write lock is held while
 waiting for the agent. After the response completes, saving is a separate atomic
 transaction. Success is printed only after the saved report has committed.
 
+### Skip unchanged AI reports
+
+`Agent analyze` automatically compares a SHA-256 fingerprint of the normalized
+report input with the last successfully saved report batch. The check occurs
+before the Azure client is initialized, so an unchanged run requires no Azure
+credentials or API calls. Both `--config` and `--report` modes support this.
+
+The fingerprint includes all selected students, courses, assignment details and
+marks, missing status, grades, message text/read observations, Canvas fields,
+value histories, current/observed record membership, confirmed links, and reporting
+rules. It preserves meaningful source dates such as due dates and Canvas update
+dates. It ignores generated/review/run IDs, collection timestamps, source-reference
+IDs, repeated-observation counts, rolling date labels, and time-only priority
+calculations. Record ordering and JSON object-key ordering do not change it;
+historical reversals still do.
+
+The comparison covers the records selected for the AI input, not every record ever
+stored. Changing reporting windows, selected record membership, rules, or student
+scope can require a new report even without a new portal grade. Coverage warnings
+are evaluated separately on every run and are never replaced by an all-clear.
+
+If **all students' input is unchanged**, the entire AI reporting batch is skipped.
+With `--notify`, one small deterministic notice is sent to each configured email/SMS
+recipient instead of another full report per student. It says no new data was
+captured, that AI reporting was skipped, and that existing missing work/concerns
+may still need attention. Incomplete/stale/limited collection and previously
+unconfirmed delivery remain explicit. Without `--notify`, only local
+`student-report-unchanged` JSON is returned; no notification is sent.
+If any student's input changes, the normal full configured batch runs.
+
+Migration 009 stores encrypted `report_checkpoints` linked to saved AI report IDs.
+The first run after upgrade establishes a baseline; older AI text is not guessed
+back into an input hash. A checkpoint advances only after all AI responses in the
+batch are successfully saved. Failed model/storage attempts do not mark their input
+as reported. Delivery failures do not discard paid-for analyses or their checkpoint;
+use `Communicate send` to retry a saved report after checking uncertain outcomes.
+Backups include the checkpoints. No-change notices are not stored as AI analyses.
+
+To regenerate deliberately, especially after publishing a new Azure system prompt:
+
+```bash
+npm run pipeline -- --phase reporting --notify --force-report
+# Or with credentials already supplied to the direct CLI:
+npm run cli -- Agent analyze --config config/review.local.json --per-student --notify --force
+```
+
+The remote prompt/model version is not discoverable from a school snapshot;
+use this override when changing it. Notifications are still explicitly opted in,
+and repeated unchanged runs can each send a short notice. This is token-saving
+comparison, not a scheduler, run lock, or exactly-once delivery outbox.
+
 ### Saved AI reports
 
 Migration 008 adds append-only `agent_reports` storage. Each report retains the
 complete returned analysis text, provider/response ID, receipt time, duration,
-token usage when available, snapshot/review IDs, student references, and source
+token usage when available, snapshot/review IDs, student references and names, and source
 coverage warnings. The JSON response includes a local `reportId`, `savedAt`, and
 storage `version` in addition to the existing analysis fields.
 
@@ -698,6 +786,8 @@ Lists show metadata only, newest receipt first; `report` returns the full saved
 response. These commands still require the local storage key. A connection test
 does not require storage and is not saved as a student report. Previously unsaved
 responses are not backfilled automatically.
+Legacy saved reports without name metadata remain readable, but must be regenerated
+before emailing; the communication layer will not substitute anonymous student numbers.
 
 Only the returned analysis and its provenance IDs are archived, not an additional
 copy of the full submitted snapshot. Keep externally supplied report files if you
@@ -730,10 +820,230 @@ must verify recommendations against source evidence and collection limitations.
 The returned `sourceStatus` and `sourceNotices` preserve deterministic input
 coverage warnings independently of anything the model says.
 Stored analyses retain that unverified label; saving is not approval of their
-recommendations. No analysis is automatically delivered or used to change school
-records or deterministic priorities. Storage failures fail the command instead of
+recommendations. Delivery requires explicit `--notify` or `Communicate send`;
+analysis is never used to change school records or deterministic priorities.
+Storage failures fail the command instead of
 printing an unsaved success result. On an agent outage, the independent local
 `Review briefing --text` remains available.
+
+## Report Communication Interface
+
+`@schoolhawk/communication` provides a provider-neutral `ReportCommunication`
+interface and `ReportCommunicator` implementation with separate channels:
+
+- `sendEmail(savedReport, recipient)` prepares a **plain-text email containing the
+  parent-facing AI summary**, the unverified-analysis qualification, and a brief,
+  plain-language source-coverage warning. An individual student's name appears in
+  both the subject and the body heading. Technical IDs, timestamps, and raw
+  coverage codes remain in local storage/CLI metadata rather than the email.
+- `sendSms(savedReport, recipient)` prepares a **short report-ready notification**,
+  student count, source-limit warning when applicable, and the local report
+  reference. It does not send student names, grades, message bodies, or the full AI
+  analysis. Generated notifications fit a single 160-character GSM-compatible
+  message; they are not silently truncated or split into multipart messages.
+
+Use the `StoredAgentReport` returned by `saveAgentReport` or `getAgentReport`.
+Recipients are supplied explicitly by application configuration, never extracted
+from model text. Each call targets one email address or one E.164 phone number.
+`prepareEmailReport` and `prepareSmsReport` expose the exact message data for local
+preview without contacting a provider.
+
+### Parent-facing report format
+
+[Prompt.txt](Prompt.txt) contains the system prompt to paste into the Azure Foundry
+agent. **Updating this file does not update Azure automatically.** Keep the prompt
+managed in Azure; the application continues to preserve the configured agent's
+system instructions rather than sending a local override. Publish/deploy the
+updated prompt to the agent/application endpoint used by this installation before
+generating new reports.
+
+The agent should return the email text itself, not JSON or an email/SMS envelope.
+Each student normally receives three analytical paragraphs:
+
+1. Overall performance and evidence-backed successes to praise or reward.
+2. **MISSING ASSIGNMENTS**, followed by supported declining grades, low scores,
+   and areas needing attention, with course/task names, dates, and reported marks.
+3. Specific next steps for parental support and encouragement.
+
+A final **New messages** section summarizes every newly captured message, plus
+substantively updated messages labeled as updates. Routine and shared notices are
+included, with original dates, senders, requests, and deadlines. Read-state changes
+alone are not new messages. Shared notices are not automatically attributed to a
+child. Missing assignments and messages must not be dropped to meet the normal
+paragraph/word target. A lack of captured messages is never proof of complete
+message coverage.
+
+Email preparation preserves plain-text summaries without truncating or rewriting
+the AI's academic analysis. For older saved JSON responses, it extracts only
+validated `reports[].email.bodyText` and plain-language limitations, requiring
+matching snapshot, student IDs/names, unique complete student coverage, and no
+reported input errors. Evidence arrays and model SMS drafts are not emailed.
+Malformed or unrecognized structured responses fail with `INVALID_REPORT_FORMAT`
+before the email provider is called; the original saved response is unchanged.
+Old reports retain their original wording/length, so generating a new report after
+the Azure prompt update is required for the new three-paragraph analysis.
+
+This formatting validation is not source-grounded fact-checking of AI conclusions.
+The CLI still returns structured JSON for programmatic use; that JSON is not the
+parent-facing email. SMS remains an application-generated minimal notification.
+
+### Channel behavior
+
+The application supplies implementations of `EmailChannel` and `SmsChannel`.
+An adapter implements `send(message, { signal })`, owns its sender configuration
+and credentials, and returns a normalized `ProviderReceipt` after the provider
+accepts the message. The communicator validates and freezes outgoing messages,
+routes them only to the selected channel, and returns a receipt linked to the
+report, channel, and recipient. The email adapter must send `text` as plain text,
+not interpret the report as HTML or instructions.
+
+With approved provider adapters supplied by the application:
+
+```typescript
+const communication = new ReportCommunicator({
+  email: emailAdapter,
+  sms: smsAdapter,
+});
+const results = await Promise.allSettled([
+  communication.sendEmail(savedReport, "parent@example.test"),
+  communication.sendSms(savedReport, "+12025550123"),
+]);
+```
+
+Inspect each result separately; a failure on one channel does not prevent the
+other attempt, and a rejection can represent an uncertain delivery outcome.
+
+Brevo adapters implement both channels. Calling an unconfigured channel fails
+explicitly; there are no production mock-success senders. Approve sender
+identities, recipients, and provider privacy terms before enabling delivery.
+Messages are sent only through explicit communication commands or `--notify`.
+
+Each message carries a stable `idempotencyKey` derived from the report, channel,
+and normalized recipient. Adapters should use it where their provider supports
+deduplication. This key alone is not a durable outbox and does not guarantee
+exactly-once delivery. Repeated calls still reach the adapter.
+
+Receipts mean **accepted**, not confirmed delivery to the inbox or phone. Provider
+exceptions, malformed receipts, and timeouts can leave the outcome unknown.
+Explicit provider rejection is distinguishable from uncertainty. Requests are
+bounded to 30 seconds by default (configurable up to five minutes), carry an abort
+signal, and are never retried by the communicator. Adapters must not blindly retry
+uncertain sends either. An adapter should cancel pending
+transport work when signaled, but timeout/cancellation cannot retract a message
+already accepted by its provider.
+
+Diagnostics include channel, status, timing, and structural counts only—not
+recipient addresses, phone numbers, report text, or credentials. Returned receipts
+contain recipient information and must be treated as private data. Persistent
+delivery history, transactional outbox/retry handling, quiet hours, and scheduling
+remain later work.
+The SMS reference identifies a report in local storage; it is not a public URL.
+
+### Brevo configuration and recipient lists
+
+The adapters use Brevo's fixed HTTPS API endpoints, the `api-key` header, and no
+automatic retries or redirects:
+
+- Email: `POST https://api.brevo.com/v3/smtp/email`, with a verified `sender`, one
+  explicit `to` recipient per request, and the full report in `textContent`.
+- SMS: `POST https://api.brevo.com/v3/transactionalSMS/sms`, as documented in the
+  [API reference](https://developers.brevo.com/reference/send-transac-sms).
+  It sends `type: "transactional"`, the short notice as `content`, and
+  `unicodeEnabled: false`. No STOP code or extra organization prefix is appended,
+  keeping the generated message within its single-segment budget.
+
+The SMS guide also names a `/send` path; this adapter uses the API-reference path
+and does not automatically switch endpoints or retry a possibly accepted message.
+See the [email guide](https://developers.brevo.com/docs/send-a-transactional-email)
+and [SMS guide](https://developers.brevo.com/docs/transactional-sms-endpoints).
+
+Keep these settings only in private `.env` or the scheduler's protected environment:
+
+| Variable | Purpose |
+| --- | --- |
+| `BREVO_KEY` | Brevo API key with transactional email/SMS permissions; `BREVIO_KEY` is also accepted, but conflicting values are rejected |
+| `BREVO_SENDER_EMAIL` | Email address configured and verified in Brevo |
+| `BREVO_SENDER_NAME` | Email display name; defaults to `SchoolHawkAI` |
+| `BREVO_SMS_SENDER` | Registered SMS Sender ID: 3–11 alphanumeric characters or a numeric sender of up to 15 digits |
+| `REPORT_EMAIL_RECIPIENTS` | Comma-separated email addresses, up to 20; blank disables email for report delivery |
+| `REPORT_SMS_RECIPIENTS` | Comma-separated E.164 numbers, up to 20; blank disables SMS for report delivery |
+
+Lists are validated before sending. Empty entries, malformed addresses/numbers,
+and duplicate normalized recipients are rejected. Each recipient receives a separate
+request, so email recipients are not exposed to one another through a shared To/CC list.
+Destinations are never inferred from AI text.
+
+Brevo requires sender approval. In particular, US/Canada SMS requires an approved
+Sender ID and toll-free registration; adding a label to `.env` does **not** complete
+that registration. Follow [Brevo's registration instructions](https://help.brevo.com/hc/en-us/articles/28255350696466-Register-a-Sender-ID-to-send-SMS-messages).
+Sender/account lookup permissions are not needed by the adapters, but the key must
+authorize the two send endpoints. Credit, permission, sender, and registration
+rejections are reported without logging the provider's raw error body.
+
+An API acceptance receipt can later become an error in Brevo's delivery logs.
+For example, an unverified sender may be accepted by the API and then rejected
+before email delivery. Check the [transactional email logs](https://app.brevo.com/transactional/email/logs),
+validate `BREVO_SENDER_EMAIL` or authenticate its domain, and complete SMS sender
+registration before enabling the daily notification job. The CLI reports provider
+acceptance, not final delivery; it does not yet process delivery webhooks.
+
+```bash
+# Inspect the private lists without contacting Brevo.
+node --env-file=.env --import tsx apps/cli/src/index.ts Communicate recipients
+
+# Send one real test message with harmless content to one explicit destination.
+node --env-file=.env --import tsx apps/cli/src/index.ts Communicate test --channel email --to parent@example.test
+node --env-file=.env --import tsx apps/cli/src/index.ts Communicate test --channel sms --to +12025550123
+
+# Send an already-saved AI report without another Azure call.
+node --env-file=.env --import tsx apps/cli/src/index.ts Communicate send --report <reportId>
+node --env-file=.env --import tsx apps/cli/src/index.ts Communicate send --report <reportId> --channel email
+```
+
+Test messages do not require a database and are not saved as AI reports. Running a
+test command again sends another test. Normal sends return accepted and failed
+recipient results separately; partial/uncertain delivery makes the command fail.
+The AI report remains saved, so delivery can be investigated without regenerating it.
+Do not retry an uncertain SMS merely because a command timed out.
+
+Brevo email receives a stable UUID-sized representation of the key in
+`headers.idempotencyKey` to meet its length restriction; its protection
+lasts **15 minutes**, not indefinitely. SMS uses the key as a tracking tag only:
+Brevo does not document equivalent SMS idempotency. These adapters therefore do
+not promise exactly-once delivery or persist a delivery ledger.
+
+### Daily pipeline command
+
+The explicit command to put in the daily scheduled job is:
+
+```bash
+npm run pipeline -- --phase all --notify
+```
+
+For a seven-day collection and assignment/message reporting window:
+
+```bash
+npm run pipeline -- --phase all --notify --days 7 --assignment-days 7 --message-days 7
+```
+
+Canvas still collects complete active-course snapshots; the report applies the
+assignment window. All retained grades and active/upcoming/missing context remain
+available according to the reporting policy. Leaving `REPORT_SMS_RECIPIENTS`
+empty disables SMS; no SMS sender configuration or SMS API request is then needed.
+
+It loads private environment settings, logs in, collects, reviews, generates an
+individual AI input for each named student, and compares its stable input hash.
+Changed input calls Azure, saves each AI response, and attempts each configured
+email/SMS recipient independently; unchanged input sends only the short notice.
+Collection failures remain warnings in the AI
+input and delivered report and still make the pipeline exit nonzero.
+Default `--phase all` **without** `--notify` does not contact Azure or Brevo.
+
+No cron/systemd timetable is installed by this option. Configure one scheduling
+authority and do not overlap runs. Each new analysis creates a new report and a
+new delivery identity; unchanged reruns skip AI but can send another short notice.
+A transactional outbox, cross-run locking, and retry/reconciliation
+policy are still required before claiming unattended exactly-once delivery.
 
 ## Canvas Login
 
@@ -1171,8 +1481,10 @@ infer removals or changes; `Review` maintains its own conservative derived histo
 - `review_profiles`: encrypted source checkpoints, scope baselines, and last-known review records.
 - `review_events`: encrypted, append-only semantic and collection-health transitions.
 - `review_evaluations`: encrypted, append-only priority/coverage snapshots with policy and evidence references.
+- `agent_reports`: encrypted, append-only AI responses with source and student metadata.
+- `report_checkpoints`: encrypted successful-batch input hashes and saved-report references for skipping unchanged AI calls.
 
-Migrations 001 through 007 run transactionally. Existing version-1 through version-6 databases upgrade
+Migrations 001 through 009 run transactionally. Existing version-1 through version-8 databases upgrade
 on open after key verification. Unknown future schema versions are rejected.
 Each run and its observations/audit event commit together. Foreign keys, WAL,
 a 5-second busy timeout, and full synchronous durability are enabled.

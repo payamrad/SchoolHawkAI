@@ -13,7 +13,7 @@ import { buildStudentSnapshot, studentSnapshotOptionsSchema,
 import { DiagnosticLogError, diagnosticErrorCode, diagnosticErrorType, reportDiagnostic } from "@schoolhawk/core/diagnostics";
 import {
   agentReportIdSchema, agentReportSummarySchema, storedAgentReportSchema, studentReportAnalysisSchema,
-  type AgentReportSummary, type StoredAgentReport,
+  reportCheckpointSchema, reportInputHashSchema, type AgentReportSummary, type ReportCheckpoint, type StoredAgentReport,
 } from "@schoolhawk/core/agent-reports";
 import { SqliteCanvasStore, withWorkspaceDatabase } from "./sqlite-canvas-store";
 import { checkAccount, checkLimit } from "./sqlite-message-store";
@@ -34,6 +34,44 @@ export async function withReviewStore<Result>(root: string, operation: (store: S
 }
 
 export class SqliteReviewStore extends SqliteCanvasStore implements ReviewStore, AgentReportStore {
+  getReportCheckpoint(scopeHash: string): ReportCheckpoint | undefined {
+    try {
+      reportInputHashSchema.parse(scopeHash);
+      const row = this.database.prepare("SELECT payload FROM report_checkpoints WHERE scope_hash = ?").get(scopeHash);
+      if (!row) return undefined;
+      const checkpoint = reportCheckpointSchema.parse(this.unseal(storedPayload.parse(row).payload,
+        JSON.stringify(["report-checkpoint", scopeHash])));
+      if (checkpoint.scopeHash !== scopeHash || checkpoint.reportIds.some(id => !this.getAgentReport(id))) {
+        throw new AgentReportStorageError("The report comparison checkpoint does not match saved AI reports.");
+      }
+      return checkpoint;
+    } catch (error) {
+      if (error instanceof DiagnosticLogError) throw error;
+      reportDiagnostic({ level: "error", code: "STORAGE_OPEN_FAILED", section: "storage", stage: "DATABASE_OPEN",
+        errorType: diagnosticErrorType(error), errorCode: diagnosticErrorCode(error) });
+      throw new AgentReportStorageError("Cannot read the saved report comparison. Check database integrity and the original key; no AI request was sent.", error);
+    }
+  }
+
+  saveReportCheckpoint(input: ReportCheckpoint): void {
+    try {
+      const checkpoint = reportCheckpointSchema.parse(input);
+      this.database.transaction(() => {
+        if (checkpoint.reportIds.some(id => !this.getAgentReport(id))) {
+          throw new AgentReportStorageError("A comparison checkpoint requires successfully saved AI reports.");
+        }
+        this.database.prepare(`INSERT INTO report_checkpoints VALUES (?, ?)
+          ON CONFLICT(scope_hash) DO UPDATE SET payload = excluded.payload`).run(checkpoint.scopeHash,
+          this.seal(checkpoint, JSON.stringify(["report-checkpoint", checkpoint.scopeHash])));
+      }).immediate();
+    } catch (error) {
+      if (error instanceof DiagnosticLogError) throw error;
+      reportDiagnostic({ level: "error", code: "STORAGE_WRITE_FAILED", section: "storage", stage: "DATABASE_WRITE",
+        errorType: diagnosticErrorType(error), errorCode: diagnosticErrorCode(error) });
+      throw new AgentReportStorageError("Cannot save the report comparison checkpoint. AI responses remain saved; inspect them before retrying.", error);
+    }
+  }
+
   saveAgentReport(input: unknown, now = new Date()): StoredAgentReport {
     reportDiagnostic({ level: "info", code: "STAGE_STARTED", stage: "DATABASE_WRITE", section: "storage" });
     const parsed = studentReportAnalysisSchema.safeParse(input);

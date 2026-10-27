@@ -3,7 +3,7 @@ import {
   SNAPSHOT_MAX_BYTES, serializeStudentSnapshot, studentSnapshotSchema, type StudentSnapshot,
 } from "@schoolhawk/core/student-snapshot";
 import { DiagnosticLogError, reportDiagnostic, type DiagnosticEvent } from "@schoolhawk/core/diagnostics";
-import { agentReplySchema, MAX_AGENT_RESPONSE_BYTES } from "@schoolhawk/core/agent-reports";
+import { agentReplySchema, MAX_AGENT_RESPONSE_BYTES, reportStudentSchema } from "@schoolhawk/core/agent-reports";
 import {
   AgentError, type AgentConnectionTest, type AgentReply, type StudentReportAgent, type StudentReportAnalysis,
 } from "./index";
@@ -127,8 +127,10 @@ export class AzureFoundryAgent implements StudentReportAgent {
   async analyzeStudentReport(report: StudentSnapshot): Promise<StudentReportAnalysis> {
     let snapshot: StudentSnapshot;
     let text: string;
+    let students: { ref: string; name: string }[];
     try {
       snapshot = studentSnapshotSchema.parse(report);
+      students = z.array(reportStudentSchema).parse(snapshot.students.map(student => ({ ref: student.id, name: student.label })));
       text = serializeStudentSnapshot(snapshot);
     } catch {
       reportDiagnostic({ level: "error", code: "SCHEMA_INVALID", stage: "AGENT_REQUEST", errorType: "validation" });
@@ -140,6 +142,7 @@ export class AzureFoundryAgent implements StudentReportAgent {
     return {
       ...reply, kind: "student-report-analysis", snapshotId: snapshot.id, reviewId: snapshot.reviewId,
       studentRefs: snapshot.students.map(student => student.id),
+      students,
       sourceStatus: snapshot.status, sourceNotices: [...snapshot.notices], validation: "unverified-ai-analysis",
     };
   }

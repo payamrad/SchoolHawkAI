@@ -72,6 +72,7 @@ test("student analysis sends the entire validated two-child snapshot as data and
   assert.equal(result.snapshotId, report.id);
   assert.equal(result.reviewId, report.reviewId);
   assert.deepEqual(result.studentRefs, report.students.map(student => student.id));
+  assert.deepEqual(result.students, report.students.map(student => ({ ref: student.id, name: student.label })));
   assert.equal(result.studentRefs.length, 2);
   assert.equal(report.totals.gradeRecords, 2);
   assert.equal(report.totals.messages, 1);

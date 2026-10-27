@@ -22,7 +22,13 @@ export const agentConnectionTestSchema = agentReplySchema.extend({
 });
 export type AgentConnectionTest = z.infer<typeof agentConnectionTestSchema>;
 
-export const studentReportAnalysisSchema = agentReplySchema.extend({
+export const reportStudentSchema = z.object({
+  ref: reviewIdSchema,
+  name: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/)
+    .refine(value => !/^(?:student|child)[\s_-]*\d+$/i.test(value) && !/^unmapped\b/i.test(value)),
+}).strict();
+
+const analysisSchema = agentReplySchema.extend({
   kind: z.literal("student-report-analysis"),
   snapshotId: reviewIdSchema,
   reviewId: reviewIdSchema,
@@ -30,17 +36,37 @@ export const studentReportAnalysisSchema = agentReplySchema.extend({
   sourceStatus: studentSnapshotSchema.shape.status,
   sourceNotices: studentSnapshotSchema.shape.notices,
   validation: z.literal("unverified-ai-analysis"),
+  students: z.array(reportStudentSchema).max(2000).optional(),
 });
+function validateStudents(value: z.infer<typeof analysisSchema>, context: z.RefinementCtx): void {
+  if (value.students === undefined) return;
+  const references = new Set(value.students.map(student => student.ref));
+  if (references.size !== value.students.length || references.size !== value.studentRefs.length ||
+      value.studentRefs.some(ref => !references.has(ref))) {
+    context.addIssue({ code: "custom", message: "Student names do not match the analysis student references." });
+  }
+}
+export const studentReportAnalysisSchema = analysisSchema.superRefine(validateStudents);
 export type StudentReportAnalysis = z.infer<typeof studentReportAnalysisSchema>;
 
-export const storedAgentReportSchema = studentReportAnalysisSchema.extend({
+const storedSchema = analysisSchema.extend({
   version: z.literal(1),
   reportId: agentReportIdSchema,
   savedAt: reviewTimestamp,
 });
+export const storedAgentReportSchema = storedSchema.superRefine(validateStudents);
 export type StoredAgentReport = z.infer<typeof storedAgentReportSchema>;
 
-export const agentReportSummarySchema = storedAgentReportSchema.pick({
+export const agentReportSummarySchema = storedSchema.pick({
   reportId: true, provider: true, receivedAt: true, savedAt: true,
 }).extend({ studentCount: count.max(2000) });
 export type AgentReportSummary = z.infer<typeof agentReportSummarySchema>;
+
+export const reportInputHashSchema = z.string().regex(/^[a-f0-9]{64}$/);
+export const reportCheckpointSchema = z.object({
+  version: z.literal(1), scopeHash: reportInputHashSchema, inputHash: reportInputHashSchema,
+  reportIds: z.array(agentReportIdSchema).min(1).max(2000)
+    .refine(values => new Set(values).size === values.length),
+  savedAt: reviewTimestamp, deliveryIncomplete: z.boolean(),
+}).strict();
+export type ReportCheckpoint = z.infer<typeof reportCheckpointSchema>;

@@ -5,6 +5,7 @@ import { buildStudentSnapshot, currentSnapshotVersion, serializeStudentSnapshot,
   type SnapshotHistoryRun, type SnapshotLinks, type StudentSnapshotOptions } from "../student-snapshot";
 import { assignmentMatchWindow } from "../assignment-correlation";
 import { assignment, assignmentRun, canvasRun, config, gradeRun, ids, instant, messageRun, snapshotReview } from "./review-fixtures";
+import { studentReportHistoryFixture } from "../../agent/tests/fixtures";
 
 const later = "2026-10-10T17:00:00.000Z";
 const latest = "2026-10-10T18:00:00.000Z";
@@ -16,6 +17,66 @@ const settings = () => config({ sources: [
   { portal: "skyward", accountId: "parent", studentId: "student-1" },
   { portal: "canvas", accountId: "canvas-parent", studentId: "10" },
 ] }] });
+
+test("individual snapshots preserve one named student's records, grades, source IDs and shared message context", () => {
+  const { settings, history, grades } = studentReportHistoryFixture();
+  const changed = structuredClone(grades);
+  changed.runId = randomUUID();
+  changed.capturedAt = later;
+  for (const student of changed.students) for (const grade of student.grades) {
+    grade.source.capturedAt = later;
+    grade.grade = "A";
+  }
+  history.push({ portal: "skyward", section: "grades", accountId: "parent", run: changed });
+  const review = snapshotReview(history, settings, new Date(latest));
+  const full = buildStudentSnapshot(history, settings, review, emptyLinks, ids, { assignmentDays: 7, messageDays: 7 });
+  const scoped = full.students.map(student => buildStudentSnapshot(history, settings, review, emptyLinks, ids,
+    { assignmentDays: 7, messageDays: 7, studentRef: student.id }));
+  for (const [index, snapshot] of scoped.entries()) {
+    assert.equal(snapshot.totals.students, 1);
+    assert.deepEqual(snapshot.students[0], full.students[index]);
+    assert.equal(snapshot.selection.studentRef, full.students[index].id);
+    assert.notEqual(snapshot.id, full.id);
+    assert.equal(snapshot.reviewId, full.reviewId);
+    assert.equal(snapshot.childRules.length, 1);
+    assert.equal(snapshot.totals.gradeRecords, 1);
+    assert.equal(snapshot.students[0].courses.flatMap(course => course.grades)[0].history.length, 2);
+    assert.equal(snapshot.messages.length, 1);
+    assert.deepEqual(snapshot.messages[0].history, full.messages[0].history);
+    assert.deepEqual(snapshot.messages[0].studentRefs, [snapshot.students[0].id]);
+    assert.equal(snapshot.messages[0].association, "account-wide-not-inferred-from-content");
+    assert(snapshot.sources.every(source => source.studentRef === null || source.studentRef === snapshot.students[0].id));
+    assert(snapshot.collectionHealth.every(health => health.studentRef === null || health.studentRef === snapshot.students[0].id));
+    assert(snapshot.attention.every(action => action.studentRef === null || action.studentRef === snapshot.students[0].id));
+    assert.equal(snapshot.omittedRecords, 0);
+    assert.deepEqual(studentSnapshotSchema.parse(snapshot), snapshot);
+  }
+  assert.equal(scoped.reduce((count, snapshot) => count + snapshot.totals.assignmentSourceRecords, 0), full.totals.assignmentSourceRecords);
+  assert.equal(scoped.reduce((count, snapshot) => count + snapshot.totals.gradeRecords, 0), full.totals.gradeRecords);
+  assert.equal(scoped.find(snapshot => snapshot.students[0].label === "casey")!.totals.sourceRuns, 4);
+  assert.throws(() => buildStudentSnapshot(history, settings, review, emptyLinks, ids,
+    { studentRef: `student_${"0".repeat(64)}` }), /not a configured child/);
+});
+
+test("individual reporting computes exclusion counts within the selected student's accounts", () => {
+  const { settings, history } = studentReportHistoryFixture();
+  settings.sources.push({ portal: "skyward", accountId: "other-parent", sections: ["messages"] });
+  settings.children.push({ id: "other-child", bindings: [{ portal: "skyward", accountId: "other-parent", studentId: "other-student" }] });
+  const unrelated = messageRun("2026-09-01T16:00:00.000Z");
+  unrelated.messages[0].sentDate = "2026-09-01";
+  unrelated.messages[0].bodyText = "OTHER_ACCOUNT_MESSAGE";
+  history.push({ portal: "skyward", section: "messages", accountId: "other-parent", run: unrelated });
+  const review = snapshotReview(history, settings);
+  const full = buildStudentSnapshot(history, settings, review, emptyLinks, ids, { messageDays: 7 });
+  const student = full.students.find(student => student.label === "avery")!;
+  const scoped = buildStudentSnapshot(history, settings, review, emptyLinks, ids, { messageDays: 7, studentRef: student.id });
+  assert.equal(full.availableRecords.messages, 2);
+  assert.equal(full.excludedRecords.messages, 1);
+  assert.equal(scoped.availableRecords.messages, 1);
+  assert.equal(scoped.excludedRecords.messages, 0);
+  assert.doesNotMatch(serializeStudentSnapshot(scoped), /OTHER_ACCOUNT_MESSAGE/);
+  assert.equal(scoped.totals.sourceRuns, 4);
+});
 
 function sample(history: SnapshotHistoryRun[], configuration = settings(), now = new Date(latest), links = emptyLinks,
   options: StudentSnapshotOptions = {}) {

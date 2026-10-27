@@ -14,6 +14,7 @@ export const SNAPSHOT_MAX_VERSIONS = 500_000;
 export const studentSnapshotOptionsSchema = z.object({
   assignmentDays: z.number().int().min(1).max(366).default(60),
   messageDays: z.number().int().min(1).max(366).default(14),
+  studentRef: reviewIdSchema.optional(),
 }).strict();
 export type StudentSnapshotOptions = z.input<typeof studentSnapshotOptionsSchema>;
 export function relevantSnapshotVersions<Version extends { id: string; scopeStatus: string; lastObservedAt: string }>(
@@ -145,6 +146,7 @@ export const studentSnapshotSchema = z.object({
     history: z.literal("all-versions-of-included-records"),
     retainUpcomingMissingUndated: z.literal(true),
     retainConfirmedLinkedDetails: z.literal(true),
+    studentRef: reviewIdSchema.optional(),
   }).strict(),
   availableRecords: z.object({ assignments: count, grades: count, messages: count }).strict(),
   excludedRecords: z.object({ assignments: count, messages: count }).strict(),
@@ -231,6 +233,8 @@ export const studentSnapshotSchema = z.object({
       record.currentSelection === "partial-only" && record.history.some(version => version.scopeStatus === "complete");
   }
   invalid ||= versionCount > SNAPSHOT_MAX_VERSIONS ||
+    snapshot.selection.studentRef !== undefined &&
+      (snapshot.students.length !== 1 || snapshot.students[0].id !== snapshot.selection.studentRef) ||
     snapshot.childRules.some(rule => !students.has(rule.studentRef)) ||
     snapshot.messages.some(message => message.studentRefs.some(id => !students.has(id))) ||
     snapshot.collectionHealth.some(health => health.studentRef !== null && !students.has(health.studentRef)) ||

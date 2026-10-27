@@ -217,11 +217,15 @@ test("diagnostic floods retain run and agent outcomes with an explicit suppressi
     log.sink({ level: "info", code: "AGENT_TEST_SUMMARY", stage: "AGENT_RESPONSE", status: "success" });
     log.sink({ level: "info", code: "AGENT_ANALYSIS_SUMMARY", stage: "AGENT_RESPONSE", status: "success", counts: { students: 2 } });
     log.sink({ level: "info", code: "AGENT_REPORT_SAVED", stage: "DATABASE_WRITE", status: "success", counts: { students: 2 } });
+    log.sink({ level: "info", code: "COMMUNICATION_ACCEPTED", stage: "COMMUNICATION_SEND", channel: "email",
+      status: "success", counts: { students: 2, accepted: 1 } });
     log.close();
     const events = readFileSync(log.file, "utf8").trim().split("\n").map(line => JSON.parse(line));
-    assert.equal(events.length, 2005);
+    assert.equal(events.length, 2006);
     assert.equal(events[2000].status, "partial");
-    assert.deepEqual(events.slice(2001, 2004).map(event => event.code), ["AGENT_TEST_SUMMARY", "AGENT_ANALYSIS_SUMMARY", "AGENT_REPORT_SAVED"]);
+    assert.deepEqual(events.slice(2001, 2005).map(event => event.code),
+      ["AGENT_TEST_SUMMARY", "AGENT_ANALYSIS_SUMMARY", "AGENT_REPORT_SAVED", "COMMUNICATION_ACCEPTED"]);
+    assert.equal(events.at(-2).channel, "email");
     assert.equal(events.at(-2).counts.students, 2);
     assert.equal(log.outcome().status, "success");
     assert.equal(events.at(-1).code, "LOG_LIMIT_REACHED");

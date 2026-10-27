@@ -11,6 +11,8 @@ import { ReviewUsageError, runReviewCli } from "./review";
 import { AgentError } from "@schoolhawk/agent";
 import { AgentUsageError, runAgentCli } from "./agent";
 import { AgentReportStorageError } from "@schoolhawk/storage/agent-reports";
+import { CommunicationError } from "@schoolhawk/communication";
+import { CommunicationUsageError, ReportDeliveryError, runCommunicationCli } from "./communication";
 
 const HELP = `SchoolHawkAI
 
@@ -20,6 +22,7 @@ Usage: npm run cli -- Truncate --LoginNotification --account <alias> [--dry-run 
   npm run cli -- Canvas --help
   npm run cli -- Review --help
   npm run cli -- Agent --help
+  npm run cli -- Communicate --help
 
 Messages prints up to N stored messages as JSON, newest sent date first (N: 1-1000).
 Uses the latest complete observation per message ID. Output includes decrypted
@@ -118,7 +121,7 @@ export async function Truncate(store: Pick<MessageStore, "truncateMessages">, op
 
 export async function runCli(args: string[], root = path.resolve(__dirname, "../../..")): Promise<void> {
   const help = (args.length === 1 && args[0] === "--help") ||
-    (args.length === 2 && ["Truncate", "Messages", "Assignments", "Canvas", "Review", "Agent"].includes(args[0]) && args[1] === "--help") ||
+    (args.length === 2 && ["Truncate", "Messages", "Assignments", "Canvas", "Review", "Agent", "Communicate"].includes(args[0]) && args[1] === "--help") ||
     (args.length === 3 && args[0] === "Canvas" && args[1] === "match" && args[2] === "--help");
   if (help) return executeCli(args, root);
   return withLocalDiagnostics(root, "cli", () => executeCli(args, root));
@@ -128,6 +131,7 @@ async function executeCli(args: string[], root: string): Promise<void> {
   process.umask(0o077);
   reportDiagnostic({ level: "info", code: "STAGE_STARTED", stage: "CLI_COMMAND" });
   if (args[0] === "Agent") return runAgentCli(args.slice(1), root);
+  if (args[0] === "Communicate") return runCommunicationCli(args.slice(1), root);
   if (args[0] === "Review") return runReviewCli(args.slice(1), root);
   if (args[0] === "Canvas") return runCanvasCli(args.slice(1), root);
   if (args[0] === "Assignments") return runCanvasCli(args[1] === "--help" ? ["--help"] : ["enriched", ...args.slice(1)], root);
@@ -156,6 +160,9 @@ async function executeCli(args: string[], root: string): Promise<void> {
 export function cliFailureMessage(error: unknown, args: string[]): string {
   if (error instanceof DiagnosticLogError) return `LOCAL_LOG: ${error.message}`;
   if (error instanceof AgentError || error instanceof AgentUsageError || error instanceof AgentReportStorageError) return `AGENT: ${error.message}`;
+  if (error instanceof CommunicationError || error instanceof CommunicationUsageError || error instanceof ReportDeliveryError) {
+    return `COMMUNICATION: ${error.message}`;
+  }
   if (error instanceof ReviewUsageError || error instanceof ReviewError) return `REVIEW: ${error.message}`;
   if (error instanceof CanvasMappingError) {
     const guidance = error.code === "NO_COURSE_MAPPINGS"

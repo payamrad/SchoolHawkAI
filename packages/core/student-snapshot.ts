@@ -81,6 +81,15 @@ export function buildStudentSnapshot(
   const config = reviewConfigSchema.parse({ ...requested, children: review.resolvedChildren ?? requested.children });
   const options = studentSnapshotOptionsSchema.parse(inputOptions);
   if (review.profileId !== config.profileId) throw new ReviewError("Snapshot configuration does not match its review profile.");
+  const selectedChild = options.studentRef === undefined ? undefined :
+    config.children.find(child => ids("student", ["configured", child.id]) === options.studentRef);
+  if (options.studentRef !== undefined && !selectedChild) {
+    throw new ReviewError("The selected student is not a configured child in this review. Resolve student identity before generating an individual report.");
+  }
+  const includesAccount = (portal: string, accountId: string) => !selectedChild ||
+    selectedChild.bindings.some(binding => binding.portal === portal && binding.accountId === accountId);
+  const includesStudent = (portal: string, accountId: string, studentId: string) => !selectedChild ||
+    selectedChild.bindings.some(binding => binding.portal === portal && binding.accountId === accountId && binding.studentId === studentId);
   const now = new Date(review.evaluatedAt);
   const assignmentWindow = assignmentMatchWindow(options.assignmentDays, now);
   const messageWindow = assignmentMatchWindow(options.messageDays, now);
@@ -90,6 +99,7 @@ export function buildStudentSnapshot(
   const latest = new Map<string, { capturedAt: string; runId: string; records: Map<string, ReviewStatus[]> }>();
   const notices = new Set<StudentSnapshot["notices"][number]>(review.notices);
   let sourceRuns = 0;
+  let inspectedRuns = 0;
   let versionCount = 0;
   let retainedBytes = 0;
   const accountRef = (portal: string, account: string) => ids("account", [portal, account]);
@@ -107,6 +117,7 @@ export function buildStudentSnapshot(
     return ref;
   };
   for (const child of config.children) for (const binding of child.bindings) {
+    if (selectedChild && child.id !== selectedChild.id) continue;
     studentRef(binding.portal, binding.accountId, binding.studentId);
   }
   const courseRef = (portal: "skyward" | "canvas", accountId: string, studentId: string, name: string, courseId: string | null) =>
@@ -128,7 +139,9 @@ export function buildStudentSnapshot(
   for (const source of history) {
     if (!config.sources.some(allowed => allowed.portal === source.portal && allowed.accountId === source.accountId &&
       allowed.sections.includes(source.section))) throw new ReviewError("Snapshot history is outside the configured source scope.");
-    if (++sourceRuns > 20000) throw new ReviewError("Snapshot source history exceeds 20,000 runs. No source runs were silently omitted.");
+    if (++inspectedRuns > 20000) throw new ReviewError("Snapshot source history exceeds 20,000 runs. No source runs were silently omitted.");
+    if (!includesAccount(source.portal, source.accountId)) continue;
+    sourceRuns++;
     if (source.run.capturedAt > review.evaluatedAt) throw new ReviewError("Snapshot source history contains a future collection.");
     const streamId = reviewStreamId(ids, source.portal, source.accountId, source.section);
     const oldLatest = latest.get(streamId);
@@ -178,6 +191,7 @@ export function buildStudentSnapshot(
 
     if (source.portal === "skyward" && source.section === "assignments") {
       for (const student of source.run.students) {
+        if (!includesStudent("skyward", source.accountId, student.id)) continue;
         studentRef("skyward", source.accountId, student.id);
         for (const section of student.sections) for (const assignment of section.assignments) {
           const { id, source: evidence, ...data } = assignment;
@@ -187,6 +201,7 @@ export function buildStudentSnapshot(
       }
     } else if (source.portal === "skyward" && source.section === "grades") {
       for (const student of source.run.students) {
+        if (!includesStudent("skyward", source.accountId, student.id)) continue;
         studentRef("skyward", source.accountId, student.id);
         for (const grade of student.grades) {
           const { id, studentSectionId, termId, source: evidence, ...data } = grade;
@@ -204,6 +219,7 @@ export function buildStudentSnapshot(
       }
     } else if (source.portal === "canvas") {
       for (const student of source.run.students) {
+        if (!includesStudent("canvas", source.accountId, student.id)) continue;
         studentRef("canvas", source.accountId, student.id);
         for (const course of student.courses) {
           const termRef = course.termId === null ? null : ids("term", ["canvas", source.accountId, student.id, "enrollment", course.termId]);
@@ -446,7 +462,12 @@ export function buildStudentSnapshot(
 
   const configuredRefs = new Map(config.children.map(child => [child.id, ids("student", ["configured", child.id])]));
   const evidence = new Map(review.evidence.map(source => [source.id, source]));
-  const collectionHealth: StudentSnapshot["collectionHealth"] = review.health.map(health => {
+  const collectionHealth: StudentSnapshot["collectionHealth"] = review.health.filter(health => {
+    if (!selectedChild) return true;
+    if (health.childId !== null) return health.childId === selectedChild.id;
+    const source = health.evidenceId ? evidence.get(health.evidenceId) : undefined;
+    return !source?.studentId || includesStudent(source.portal, source.accountId, source.studentId);
+  }).map(health => {
     const source = health.evidenceId ? evidence.get(health.evidenceId) : undefined;
     return {
       id: health.id, portal: health.portal, section: health.section,
@@ -458,7 +479,8 @@ export function buildStudentSnapshot(
     };
   });
   const attention: StudentSnapshot["attention"] = review.actions.filter(action =>
-    action.entity === "collection" || action.recordIds.some(id => records.has(id))).map(action => ({
+    (!selectedChild || action.childId === null || action.childId === selectedChild.id) &&
+    (action.entity === "collection" || action.recordIds.some(id => records.has(id)))).map(action => ({
     id: action.id, studentRef: action.childId ? configuredRefs.get(action.childId) ?? null :
       action.recordIds.length ? histories.get(action.recordIds[0])?.studentRef ?? null : null,
     recordRefs: action.recordIds.filter(id => records.has(id)), entity: action.entity,
@@ -506,13 +528,19 @@ export function buildStudentSnapshot(
       "Include strengths and improvements as well as concerns; do not infer motivation, emotional well-being or learning difficulties from school records.",
       "Collection windows, missing/failed scopes and stale records are explicit limitations. Uncollected or deleted source data cannot be reconstructed; this is not an unqualified all-clear.",
       `Report date in the household timezone: ${reviewDate(now, config.timeZone)}. No external model or notification was invoked.`,
+      ...(selectedChild ? [
+        `This report is scoped to ${selectedChild.id}. Identify this student by that name, not as student 1 or student 2.`,
+        "Account-wide messages and unassigned collection-health warnings are shared family context and can concern other students; do not infer ownership.",
+      ] : []),
     ],
     recentWindowStart: review.recentSince, rules: config.rules,
     selection: { assignments: assignmentWindow, messages: messageWindow, newMessagesSince: review.recentSince,
       grades: "all-retained", earlierAssignmentGrades: "all-retained-marks-without-full-details", history: "all-versions-of-included-records",
-      retainUpcomingMissingUndated: true, retainConfirmedLinkedDetails: true },
+      retainUpcomingMissingUndated: true, retainConfirmedLinkedDetails: true,
+      ...(options.studentRef === undefined ? {} : { studentRef: options.studentRef }) },
     availableRecords, excludedRecords,
-    childRules: review.childRules.map(rule => ({ studentRef: configuredRefs.get(rule.childId)!, rules: rule.rules })),
+    childRules: review.childRules.filter(rule => !selectedChild || rule.childId === selectedChild.id)
+      .map(rule => ({ studentRef: configuredRefs.get(rule.childId)!, rules: rule.rules })),
     totals: {
       students: studentList.length, courses: courses.size,
       assignmentSourceRecords: recordsList.filter(record => record.kind === "assignment").length,

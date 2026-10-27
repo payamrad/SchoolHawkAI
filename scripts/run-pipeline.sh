@@ -11,6 +11,9 @@ Usage: bash scripts/run-pipeline.sh [options]
                      Order: login -> collection -> change-detection -> reporting.
                      all and collection always log in first.
   --login            Also log in for local-only phases; collection already requires login.
+  --notify           Opt in to Azure analysis, encrypted response storage, and Brevo
+                     email/SMS delivery during reporting. Uses student-snapshot/JSON.
+  --force-report     With --notify, generate AI reports even if school data is unchanged.
   --config <path>     Private review JSON (default: config/review.local.json).
                      Relative paths are resolved from the repository root.
   --env-file <path>   Private dotenv settings (default: repository-root .env if present).
@@ -54,8 +57,13 @@ It includes all retained grades, selected assignments, and new/recent messages.
 Without explicit --days/--messages overrides, snapshot pipelines collect assignments
 for --assignment-days and all messages for --message-days to populate the report.
 No school-year start date is needed. --days affects collection, not report filtering.
-Reporting is the current deterministic local summary/input, NOT a hosted AI report.
-No setup, matching approvals, scheduler, email, or SMS is performed.
+Without --notify, reporting is the local summary/input, NOT a hosted AI report.
+--notify instead runs Agent analyze --per-student --notify with the selected windows.
+It sends private school data to Azure and sends the saved AI report through Brevo.
+Unchanged report input skips Azure and sends a short no-new-data notice instead.
+Use --force-report after changing the Azure prompt or to explicitly regenerate.
+Pipeline collection failures are carried into the AI input and delivery warnings.
+No setup, matching approvals, or scheduler is performed.
 
 Failed login skips that portal's collections, without falling back to old sessions
 or retrying. Independent login/collection failures do not prevent other portals or review.
@@ -81,12 +89,22 @@ assignment_days=60
 message_days=14
 dry_run=false
 login=false
+notify=false
+force_report=false
 declare -A provided=()
 while (( $# )); do
   case "$1" in
     --help|-h) usage; exit 0 ;;
     --dry-run) dry_run=true; shift; continue ;;
     --login) login=true; shift; continue ;;
+    --notify)
+      [[ "$notify" == false ]] || fail "Specify --notify at most once."
+      notify=true; shift; continue
+      ;;
+    --force-report)
+      [[ "$force_report" == false ]] || fail "Specify --force-report at most once."
+      force_report=true; shift; continue
+      ;;
     --phase|--config|--env-file|--days|--messages|--format|--report-type|--assignment-days|--message-days)
       (( $# >= 2 )) || fail "Missing option value. Use --help."
       option=$1
@@ -150,6 +168,15 @@ for phase in "${phases[@]}"; do
   esac
 done
 
+if [[ "$notify" == true ]]; then
+  [[ "$reporting" == true ]] || fail "--notify requires reporting (or all)."
+  if [[ -z "${provided[--report-type]:-}" ]]; then report_type=student-snapshot; fi
+  if [[ -z "${provided[--format]:-}" ]]; then format=json; fi
+  [[ "$report_type" == student-snapshot && "$format" == json ]] ||
+    fail "--notify requires --report-type student-snapshot and --format json."
+fi
+[[ "$force_report" != true || "$notify" == true ]] || fail "--force-report requires --notify."
+
 if [[ -n "${provided[--report-type]:-}" && "$reporting" != true ]]; then
   fail "--report-type requires the reporting phase (or all)."
 fi
@@ -183,6 +210,7 @@ portal_access=$collection
 [[ "$login" != true ]] || portal_access=true
 if ! plan=$(
 unset SKYWARD_USERNAME SKYWARD_PASSWORD CANVAS_USERNAME CANVAS_PASSWORD AZURE_FOUNDRY_API_KEY
+unset BREVO_KEY BREVIO_KEY BREVO_SENDER_EMAIL BREVO_SENDER_NAME BREVO_SMS_SENDER REPORT_EMAIL_RECIPIENTS REPORT_SMS_RECIPIENTS
 node --import tsx - "$config" "$portal_access" <<'NODE'
 let ReviewUsageError;
 try {
@@ -308,7 +336,10 @@ run_command() {
   if (
     # Never trace credential expansion, including when invoked with bash -x.
     set +x
-    unset AZURE_FOUNDRY_API_KEY
+    if [[ "$label" != reporting/agent ]]; then
+      unset AZURE_FOUNDRY_API_KEY BREVO_KEY BREVIO_KEY
+      unset BREVO_SENDER_EMAIL BREVO_SENDER_NAME BREVO_SMS_SENDER REPORT_EMAIL_RECIPIENTS REPORT_SMS_RECIPIENTS
+    fi
     case "$label" in
       login/skyward)
         unset CANVAS_USERNAME CANVAS_PASSWORD
@@ -390,14 +421,21 @@ if [[ "$reporting" == true ]]; then
   if [[ "$review_failed" == true ]]; then
     printf 'PIPELINE: Reporting skipped because change detection failed.\n' >&2
   else
-    report_command=briefing
-    [[ "$report_type" != student-snapshot ]] || report_command=snapshot
-    command=(npm run cli -- Review "$report_command" --config "$config")
-    if [[ "$report_type" == student-snapshot ]]; then
-      command+=(--assignment-days "$assignment_days" --message-days "$message_days")
+    if [[ "$notify" == true ]]; then
+      command=(npm run cli -- Agent analyze --config "$config" --assignment-days "$assignment_days" --message-days "$message_days" --per-student --notify)
+      [[ "$force_report" != true ]] || command+=(--force)
+      [[ "$collection_failed" != true ]] || command+=(--collection-incomplete)
+      if ! run_command reporting/agent "${command[@]}"; then :; fi
+    else
+      report_command=briefing
+      [[ "$report_type" != student-snapshot ]] || report_command=snapshot
+      command=(npm run cli -- Review "$report_command" --config "$config")
+      if [[ "$report_type" == student-snapshot ]]; then
+        command+=(--assignment-days "$assignment_days" --message-days "$message_days")
+      fi
+      [[ "$format" != text ]] || command+=(--text)
+      if ! run_command reporting "${command[@]}"; then :; fi
     fi
-    [[ "$format" != text ]] || command+=(--text)
-    if ! run_command reporting "${command[@]}"; then :; fi
   fi
 fi
 

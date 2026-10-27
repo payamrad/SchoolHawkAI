@@ -46,6 +46,24 @@ test("exported values, including empty values, override dotenv without mutating 
   } finally { input.close(); }
 });
 
+test("Brevo credentials, sender settings and recipient lists are supported without evaluating their contents", () => {
+  const input = fixture([
+    "BREVO_KEY=PRIVATE_KEY",
+    "BREVIO_KEY=PRIVATE_ALIAS",
+    "BREVO_SENDER_EMAIL=sender@example.test",
+    "BREVO_SENDER_NAME=SchoolHawkAI",
+    "BREVO_SMS_SENDER=SchoolHawk",
+    "REPORT_EMAIL_RECIPIENTS=parent@example.test,other@example.test",
+    "REPORT_SMS_RECIPIENTS=+12025550123",
+  ].join("\n"));
+  try {
+    const result = readPipelineEnvironment(input.file, {}, true);
+    assert.equal(result.values.BREVO_KEY, "PRIVATE_KEY");
+    assert.equal(result.values.BREVIO_KEY, "PRIVATE_ALIAS");
+    assert.equal(result.values.REPORT_EMAIL_RECIPIENTS, "parent@example.test,other@example.test");
+    assert.equal(result.values.REPORT_SMS_RECIPIENTS, "+12025550123");
+  } finally { input.close(); }
+});
 test("only the missing optional default is tolerated; unsafe, required, oversized and invalid files fail explicitly", () => {
   const input = fixture("SKYWARD_PASSWORD=PRIVATE");
   try {

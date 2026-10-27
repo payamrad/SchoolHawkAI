@@ -22,6 +22,7 @@ function analysis(overrides: Partial<StudentReportAnalysis> = {}): StudentReport
     usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
     kind: "student-report-analysis", snapshotId: report.id, reviewId: report.reviewId,
     studentRefs: report.students.map(student => student.id), sourceStatus: "incomplete-source-coverage",
+    students: report.students.map(student => ({ ref: student.id, name: student.label })),
     sourceNotices: ["collection-incomplete"], validation: "unverified-ai-analysis", ...overrides,
   });
 }
@@ -40,6 +41,7 @@ test("AI reports survive close/reopen and backup, with their full response and p
     assert.equal(saved.snapshotId, value.snapshotId);
     assert.deepEqual(saved.sourceNotices, value.sourceNotices);
     assert.deepEqual(saved.usage, value.usage);
+    assert.deepEqual(saved.students, value.students);
     assert.equal(saved.validation, "unverified-ai-analysis");
     await store.backup(backup);
     store.close();
@@ -75,6 +77,20 @@ test("identical response saves are idempotent and conflicting reuse cannot overw
   } finally { store.close(); }
 });
 
+test("legacy reports without name metadata remain readable while new name/reference mismatches are rejected", () => {
+  const store = new SqliteReviewStore(":memory:", randomBytes(32));
+  try {
+    const old = store.saveAgentReport(analysis({ students: undefined }));
+    assert.equal(store.getAgentReport(old.reportId)!.students, undefined);
+    const value = analysis({ responseId: "resp_named" });
+    withDiagnosticSink(() => {}, () => {
+      assert.throws(() => store.saveAgentReport({ ...value, students: [{ ref: value.studentRefs[0], name: "Nicole" }] }), AgentReportStorageError);
+      assert.throws(() => store.saveAgentReport({ ...value,
+        students: value.studentRefs.map(ref => ({ ref, name: "student 1" })) }), AgentReportStorageError);
+    });
+    assert.equal(store.listAgentReports().length, 1);
+  } finally { store.close(); }
+});
 test("report listings are bounded metadata, ordered by receipt time, and full lookup requires a valid ID", () => {
   const store = new SqliteReviewStore(":memory:", randomBytes(32));
   try {
@@ -151,7 +167,7 @@ test("version-7 databases migrate without rewriting source or review history, an
     const legacy = new Database(file);
     const original = legacy.prepare("SELECT content_hash, payload FROM assignment_runs").all();
     try {
-      legacy.exec("DROP TABLE agent_reports; PRAGMA user_version = 7;");
+      legacy.exec("DROP TABLE report_checkpoints; DROP TABLE agent_reports; PRAGMA user_version = 7;");
       withDiagnosticSink(() => {}, () => assert.throws(() => new SqliteReviewStore(file, randomBytes(32)), /Incorrect storage key/));
       assert.equal(legacy.pragma("user_version", { simple: true }), 7);
       assert.equal(legacy.prepare("SELECT name FROM sqlite_schema WHERE name = 'agent_reports'").get(), undefined);
@@ -162,7 +178,7 @@ test("version-7 databases migrate without rewriting source or review history, an
     assert.deepEqual(store.listAgentReports(), []);
     const current = new Database(file, { readonly: true });
     try {
-      assert.equal(current.pragma("user_version", { simple: true }), 8);
+      assert.equal(current.pragma("user_version", { simple: true }), 9);
       assert.deepEqual(current.prepare("SELECT content_hash, payload FROM assignment_runs").all(), original);
     } finally { current.close(); }
   } finally { store.close(); key.fill(0); rmSync(root, { recursive: true, force: true }); }
