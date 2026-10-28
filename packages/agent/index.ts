@@ -1,15 +1,15 @@
 import type { StudentSnapshot } from "@schoolhawk/core/student-snapshot";
-import type { AgentConnectionTest, StudentReportAnalysis } from "@schoolhawk/core/agent-reports";
+import type { AgentConnectionTest, PreviousCommunication, StudentReportAnalysis } from "@schoolhawk/core/agent-reports";
 export type { AgentReply, AgentConnectionTest, StudentReportAnalysis } from "@schoolhawk/core/agent-reports";
 
 export interface StudentReportAgent {
   testConnection(): Promise<AgentConnectionTest>;
-  analyzeStudentReport(report: StudentSnapshot): Promise<StudentReportAnalysis>;
+  analyzeStudentReport(report: StudentSnapshot, previousCommunication?: PreviousCommunication): Promise<StudentReportAnalysis>;
 }
 
 const errors = {
   CONFIGURATION: "Invalid agent configuration. Check the endpoint, API key, API version, timeout, and request limit. Values were withheld.",
-  INVALID_REPORT: "The agent requires a valid, complete student-snapshot document within the snapshot size limit. No request was sent.",
+  INVALID_REPORT: "The agent requires a valid, complete student snapshot and any previous email context must match its student scope and size limits. No request was sent.",
   REQUEST_TOO_LARGE: "The serialized agent request exceeds its configured byte limit. No records were truncated and no request was sent.",
   TIMEOUT: "The agent request timed out. Its remote outcome may be uncertain; no automatic retry was attempted.",
   NETWORK: "Communication with the configured agent failed. Check connectivity and the approved endpoint; private error details were withheld.",

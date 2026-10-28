@@ -3,8 +3,10 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import Database from "better-sqlite3";
 import { withLocalDiagnostics } from "@schoolhawk/storage/diagnostics";
 import { SqliteReviewStore } from "@schoolhawk/storage/review-sqlite";
+import { AgentReportStorageError } from "@schoolhawk/storage/agent-reports";
 import { CommunicationError } from "@schoolhawk/communication";
 import { brevoEnvironment, savedReport, twilioEnvironment, twilioReceipt } from "../../../packages/communication/tests/fixtures";
 import { setupDatabase } from "../../../scripts/setup-database";
@@ -115,10 +117,48 @@ test("saved reports fan out to private lists independently, and a partial failur
     const emails = calls.filter(call => call.url.endsWith("/smtp/email"));
     assert(emails.every(call => Array.isArray(call.body.to) && call.body.to.length === 1));
     assert(emails.every(call => String(call.body.textContent).endsWith(stored.text)));
+    const key = readFileSync(path.join(root, "playwright/.auth/messages.key"));
+    const store = new SqliteReviewStore(path.join(root, "data/database/schoolhawk.sqlite"), key);
+    try {
+      const email = store.getPreviousCommunication(stored.studentRefs)!.latestEmail;
+      assert.equal(email.text, emails[0].body.textContent);
+      assert.equal(email.subject, emails[0].body.subject);
+      assert.equal(email.kind, "report");
+      assert.equal(email.reportId, stored.reportId);
+      assert.equal(Object.hasOwn(email, "to"), false);
+    } finally { store.close(); key.fill(0); }
     const sms = calls.find(call => call.url.endsWith("/Messages.json"))!;
     assert(!String(sms.body.Body).includes(stored.text));
     const log = readFileSync(path.join(root, "logs", readdirSync(path.join(root, "logs"))[0]), "utf8");
     assert.doesNotMatch(log, /PRIVATE_AI_REPORT_TEXT|PRIVATE_BREVO_KEY|PRIVATE_TWILIO_TOKEN|Basic |parent@example|12025550123/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("accepted email with a history persistence failure fails explicitly rather than claiming success or retrying", async context => {
+  const root = mkdtempSync(path.join(tmpdir(), "schoolhawk-email-persistence-failure-"));
+  const output: string[] = [];
+  let sends = 0;
+  context.mock.method(console, "log", (value: string) => output.push(value));
+  context.mock.method(console, "error", () => {});
+  context.mock.method(globalThis, "fetch", async () => {
+    sends++;
+    return new Response(JSON.stringify({ messageId: "<accepted@example.test>" }), { status: 201 });
+  });
+  try {
+    const stored = seed(root);
+    const connection = new Database(path.join(root, "data/database/schoolhawk.sqlite"));
+    try {
+      connection.exec("CREATE TRIGGER fail_email_history BEFORE INSERT ON email_communications BEGIN SELECT RAISE(ABORT, 'PRIVATE_WRITE_FAILURE'); END;");
+    } finally { connection.close(); }
+    await assert.rejects(runCommunicationCli(["send", "--report", stored.reportId, "--channel", "email"], root,
+      { ...brevoEnvironment, REPORT_SMS_RECIPIENTS: "" }), error => {
+      assert(error instanceof AgentReportStorageError);
+      assert.match(error.message, /accepted.*could not be saved/);
+      assert.doesNotMatch(error.message, /PRIVATE/);
+      return true;
+    });
+    assert.equal(sends, 1);
+    assert.equal(output.length, 0);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

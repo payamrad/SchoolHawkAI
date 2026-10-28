@@ -167,7 +167,7 @@ test("version-7 databases migrate without rewriting source or review history, an
     const legacy = new Database(file);
     const original = legacy.prepare("SELECT content_hash, payload FROM assignment_runs").all();
     try {
-      legacy.exec("DROP TABLE report_checkpoints; DROP TABLE agent_reports; PRAGMA user_version = 7;");
+      legacy.exec("DROP TABLE email_communications; DROP TABLE report_checkpoints; DROP TABLE agent_reports; PRAGMA user_version = 7;");
       withDiagnosticSink(() => {}, () => assert.throws(() => new SqliteReviewStore(file, randomBytes(32)), /Incorrect storage key/));
       assert.equal(legacy.pragma("user_version", { simple: true }), 7);
       assert.equal(legacy.prepare("SELECT name FROM sqlite_schema WHERE name = 'agent_reports'").get(), undefined);
@@ -178,7 +178,7 @@ test("version-7 databases migrate without rewriting source or review history, an
     assert.deepEqual(store.listAgentReports(), []);
     const current = new Database(file, { readonly: true });
     try {
-      assert.equal(current.pragma("user_version", { simple: true }), 9);
+      assert.equal(current.pragma("user_version", { simple: true }), 10);
       assert.deepEqual(current.prepare("SELECT content_hash, payload FROM assignment_runs").all(), original);
     } finally { current.close(); }
   } finally { store.close(); key.fill(0); rmSync(root, { recursive: true, force: true }); }

@@ -1,4 +1,4 @@
-import type { AgentReportSummary, ReportCheckpoint, StoredAgentReport, StudentReportAnalysis } from "@schoolhawk/core/agent-reports";
+import type { AgentReportSummary, EmailCommunication, PreviousCommunication, ReportCheckpoint, StoredAgentReport, StudentReportAnalysis } from "@schoolhawk/core/agent-reports";
 import { diagnosticErrorCode } from "@schoolhawk/core/diagnostics";
 
 export interface AgentReportStore {
@@ -7,6 +7,8 @@ export interface AgentReportStore {
   listAgentReports(options?: { limit?: number; offset?: number }): AgentReportSummary[];
   getReportCheckpoint(scopeHash: string): ReportCheckpoint | undefined;
   saveReportCheckpoint(checkpoint: ReportCheckpoint): void;
+  saveEmailCommunication(communication: EmailCommunication): void;
+  getPreviousCommunication(studentRefs: string[]): PreviousCommunication | undefined;
 }
 
 export class AgentReportStorageError extends Error {

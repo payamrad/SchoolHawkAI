@@ -29,6 +29,9 @@ This is an explicit external transmission of private
 educational data. Approve the provider and its data handling before using real data.
 --config generates the normal 60-day assignment / 14-day message snapshot first.
 --report sends an existing validated snapshot, including any custom report windows.
+Both modes include the latest provider-accepted email for the same student scope,
+plus the last full report email when the latest email was a no-change notice.
+Saved drafts and failed/uncertain sends are not prior communication.
 --notify emails saved reports through Brevo and sends short SMS notices through Twilio.
 Recipients come from the private REPORT_EMAIL_RECIPIENTS and REPORT_SMS_RECIPIENTS lists.
 --per-student generates and saves one individually scoped AI report per named child.
@@ -167,7 +170,11 @@ export async function runAgentCli(args: string[], root: string, environment: Nod
       const communication = delivery ? await deliverNoChangeNotice({
         reportId: previous.reportIds[0], checkedAt: now.toISOString(), limited,
         previousDeliveryIncomplete: previous.deliveryIncomplete,
-      }, delivery) : undefined;
+      }, delivery, store, previous.reportIds.map(id => {
+        const saved = store.getAgentReport(id);
+        if (!saved) throw new AgentReportStorageError("The previous report batch is missing a saved report.");
+        return saved;
+      })) : undefined;
       reportDiagnostic({ level: "info", code: "AGENT_REPORT_UNCHANGED", stage: "AGENT_COMPARE",
         status: limited ? "partial" : "success", counts: { students: report.students.length, requests: 0 } });
       console.log(JSON.stringify({
@@ -191,9 +198,10 @@ export async function runAgentCli(args: string[], root: string, environment: Nod
         snapshot.instructions.push("The pipeline reported an incomplete login or collection step. Saved collection health may not include preflight failures; do not present an all-clear.");
       }
       console.error("AGENT: Sending private educational data to the configured Azure Foundry agent. The completed response will be saved locally.");
-      const analysis = await agent.analyzeStudentReport(snapshot);
+      const context = store.getPreviousCommunication(snapshot.students.map(student => student.id));
+      const analysis = await agent.analyzeStudentReport(snapshot, context);
       const saved = store.saveAgentReport(analysis);
-      return delivery ? { ...saved, communication: await deliverReport(saved, delivery) } : saved;
+      return delivery ? { ...saved, communication: await deliverReport(saved, delivery, store) } : saved;
     };
     if (!input.perStudent) {
       const result = await analyze(report);

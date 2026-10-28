@@ -14,6 +14,7 @@ import { DiagnosticLogError, diagnosticErrorCode, diagnosticErrorType, reportDia
 import {
   agentReportIdSchema, agentReportSummarySchema, storedAgentReportSchema, studentReportAnalysisSchema,
   reportCheckpointSchema, reportInputHashSchema, type AgentReportSummary, type ReportCheckpoint, type StoredAgentReport,
+  emailCommunicationSchema, type EmailCommunication, type PreviousCommunication,
 } from "@schoolhawk/core/agent-reports";
 import { SqliteCanvasStore, withWorkspaceDatabase } from "./sqlite-canvas-store";
 import { checkAccount, checkLimit } from "./sqlite-message-store";
@@ -34,6 +35,62 @@ export async function withReviewStore<Result>(root: string, operation: (store: S
 }
 
 export class SqliteReviewStore extends SqliteCanvasStore implements ReviewStore, AgentReportStore {
+  private emailScope(studentRefs: string[]): string {
+    const refs = emailCommunicationSchema.shape.studentRefs.parse(studentRefs);
+    return this.hash(JSON.stringify(["email-scope-v1", refs.slice().sort()]));
+  }
+
+  saveEmailCommunication(input: EmailCommunication): void {
+    try {
+      const email = emailCommunicationSchema.parse(input);
+      const report = this.getAgentReport(email.reportId);
+      if (!report || this.emailScope(report.studentRefs) !== this.emailScope(email.studentRefs)) {
+        throw new AgentReportStorageError("Email context requires a saved AI report with the same student scope.");
+      }
+      const scopeHash = this.emailScope(email.studentRefs);
+      this.database.prepare(`INSERT INTO email_communications VALUES (?, ?, ?, ?)
+        ON CONFLICT(scope_hash, kind) DO UPDATE SET accepted_at = excluded.accepted_at, payload = excluded.payload
+        WHERE excluded.accepted_at >= email_communications.accepted_at`).run(
+        scopeHash, email.kind, email.acceptedAt,
+        this.seal(email, JSON.stringify(["email-communication", scopeHash, email.kind])),
+      );
+    } catch (error) {
+      if (error instanceof DiagnosticLogError) throw error;
+      reportDiagnostic({ level: "error", code: "STORAGE_WRITE_FAILED", section: "storage", stage: "DATABASE_WRITE",
+        errorType: diagnosticErrorType(error), errorCode: diagnosticErrorCode(error) });
+      throw new AgentReportStorageError("The email was accepted by the provider but its communication context could not be saved. Check storage before retrying; resending may duplicate the email.", error);
+    }
+  }
+
+  getPreviousCommunication(studentRefs: string[]): PreviousCommunication | undefined {
+    try {
+      const scopeHash = this.emailScope(studentRefs);
+      const rows = this.database.prepare(`SELECT kind, accepted_at AS acceptedAt, payload FROM email_communications
+        WHERE scope_hash = ? ORDER BY accepted_at DESC, kind DESC`).all(scopeHash);
+      const emails = rows.map(row => {
+        const value = z.object({ kind: emailCommunicationSchema.shape.kind, acceptedAt: reviewTimestamp,
+          payload: z.instanceof(Buffer) }).parse(row);
+        const email = emailCommunicationSchema.parse(this.unseal(value.payload,
+          JSON.stringify(["email-communication", scopeHash, value.kind])));
+        if (this.emailScope(email.studentRefs) !== scopeHash || email.kind !== value.kind || email.acceptedAt !== value.acceptedAt) {
+          throw new AgentReportStorageError("Email communication metadata does not match its protected contents.");
+        }
+        return email;
+      });
+      const latestEmail = emails[0];
+      if (!latestEmail) return undefined;
+      const report = emails.find(email => email.kind === "report");
+      return { latestEmail, ...(latestEmail.kind === "no-change" && report ? {
+        latestReportEmail: { ...report, kind: "report" as const },
+      } : {}) };
+    } catch (error) {
+      if (error instanceof DiagnosticLogError) throw error;
+      reportDiagnostic({ level: "error", code: "STORAGE_OPEN_FAILED", section: "storage", stage: "DATABASE_OPEN",
+        errorType: diagnosticErrorType(error), errorCode: diagnosticErrorCode(error) });
+      throw new AgentReportStorageError("Cannot read previous email communication. Check database integrity and the original key; no AI request was sent.", error);
+    }
+  }
+
   getReportCheckpoint(scopeHash: string): ReportCheckpoint | undefined {
     try {
       reportInputHashSchema.parse(scopeHash);

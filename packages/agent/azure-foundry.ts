@@ -3,7 +3,8 @@ import {
   SNAPSHOT_MAX_BYTES, serializeStudentSnapshot, studentSnapshotSchema, type StudentSnapshot,
 } from "@schoolhawk/core/student-snapshot";
 import { DiagnosticLogError, reportDiagnostic, type DiagnosticEvent } from "@schoolhawk/core/diagnostics";
-import { agentReplySchema, MAX_AGENT_RESPONSE_BYTES, reportStudentSchema } from "@schoolhawk/core/agent-reports";
+import { agentReplySchema, MAX_AGENT_RESPONSE_BYTES, previousCommunicationSchema, reportStudentSchema,
+  type PreviousCommunication } from "@schoolhawk/core/agent-reports";
 import {
   AgentError, type AgentConnectionTest, type AgentReply, type StudentReportAgent, type StudentReportAnalysis,
 } from "./index";
@@ -124,7 +125,7 @@ export class AzureFoundryAgent implements StudentReportAgent {
     return { ...reply, kind: "connection-test", connected: true };
   }
 
-  async analyzeStudentReport(report: StudentSnapshot): Promise<StudentReportAnalysis> {
+  async analyzeStudentReport(report: StudentSnapshot, previousCommunication?: PreviousCommunication): Promise<StudentReportAnalysis> {
     let snapshot: StudentSnapshot;
     let text: string;
     let students: { ref: string; name: string }[];
@@ -132,6 +133,16 @@ export class AzureFoundryAgent implements StudentReportAgent {
       snapshot = studentSnapshotSchema.parse(report);
       students = z.array(reportStudentSchema).parse(snapshot.students.map(student => ({ ref: student.id, name: student.label })));
       text = serializeStudentSnapshot(snapshot);
+      if (previousCommunication !== undefined) {
+        const context = previousCommunicationSchema.parse(previousCommunication);
+        const refs = snapshot.students.map(student => student.id);
+        for (const email of [context.latestEmail, ...(context.latestReportEmail ? [context.latestReportEmail] : [])]) {
+          if (email.studentRefs.length !== refs.length || refs.some(ref => !email.studentRefs.includes(ref))) {
+            throw new AgentError("INVALID_REPORT");
+          }
+        }
+        text = JSON.stringify({ snapshot, previousCommunication: context });
+      }
     } catch {
       reportDiagnostic({ level: "error", code: "SCHEMA_INVALID", stage: "AGENT_REQUEST", errorType: "validation" });
       throw new AgentError("INVALID_REPORT");

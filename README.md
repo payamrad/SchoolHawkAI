@@ -626,7 +626,7 @@ validation of their conclusions and email/SMS delivery remain later stages.
 - `testConnection()` sends synthetic text and requires a completed, nonempty agent
   reply. It does not load school data or require a school database/key. The agent
   need not echo a special marker; its existing system prompt remains in control.
-- `analyzeStudentReport(report)` accepts a schema-valid full student snapshot,
+- `analyzeStudentReport(report, previousCommunication?)` accepts a schema-valid full student snapshot,
   transmits every included field, and returns the agent's text with the input
   snapshot/review IDs and student references.
 
@@ -706,6 +706,42 @@ key. Storage is opened and validated before the request is sent. The database
 connection remains available, but no SQL transaction or write lock is held while
 waiting for the agent. After the response completes, saving is a separate atomic
 transaction. Success is printed only after the saved report has committed.
+
+### Previous email context and daily updates
+
+Both analysis modes automatically include the latest recorded provider-accepted
+email for the **exact same set of student references**. With history available,
+the user-data JSON is `{ snapshot, previousCommunication }`; otherwise it remains
+the original snapshot. `previousCommunication.latestEmail` contains the subject,
+full delivered-format text, acceptance time, kind (`report` or `no-change`), and
+local report/student references, but no recipient addresses or provider credentials.
+If the latest email was a no-change notice, `latestReportEmail` also supplies the
+last full report so that a short notice does not erase the substantive context.
+
+Migration 010 retains the latest report email and no-change email per student
+scope in encrypted `email_communications`. Both `Agent analyze --notify` and
+`Communicate send` record the exact prepared email only after provider acceptance,
+including accepted emails in partially failed delivery batches. SMS, connectivity
+tests, unsent drafts, and failed/uncertain sends do not replace this history.
+Persistence failures after acceptance fail explicitly; inspect storage/provider
+state before retrying to avoid duplicate emails. Provider acceptance is not proof
+of inbox delivery, reading, or parental action.
+
+Existing saved AI reports are not backfilled as sent emails. The first accepted
+email after upgrade establishes history. Student-scoped reports never receive
+another child's or a combined-family email; switching between individual and
+combined scopes starts separate communication context. Backups preserve this
+history. Changing email history alone does not invalidate the school-data
+fingerprint or force another model call.
+
+Copy the updated [SamplePrompt.txt](SamplePrompt.txt) into the Azure Foundry
+agent's system prompt separately; the application does not publish or override it.
+It instructs the agent to focus on daily news and changes, compress previously
+communicated history to one or two sentences when useful for trends, avoid
+repeating unchanged message summaries, and keep ongoing missing work, urgent
+deadlines, and source limitations visible. Previous AI text is untrusted context,
+not authoritative school evidence. Use `--force` / `--force-report` for an immediate
+regeneration after updating the remote prompt.
 
 ### Skip unchanged AI reports
 
@@ -850,7 +886,7 @@ preview without contacting a provider.
 
 ### Parent-facing report format
 
-[Prompt.txt](Prompt.txt) contains the system prompt to paste into the Azure Foundry
+[SamplePrompt.txt](SamplePrompt.txt) contains the system prompt to paste into the Azure Foundry
 agent. **Updating this file does not update Azure automatically.** Keep the prompt
 managed in Azure; the application continues to preserve the configured agent's
 system instructions rather than sending a local override. Publish/deploy the
@@ -860,13 +896,15 @@ generating new reports.
 The agent should return the email text itself, not JSON or an email/SMS envelope.
 Each student normally receives three analytical paragraphs:
 
-1. Overall performance and evidence-backed successes to praise or reward.
+1. Meaningful daily changes and new evidence-backed successes to praise or reward
+   (a broader performance overview when no previous email is available).
 2. **MISSING ASSIGNMENTS**, followed by supported declining grades, low scores,
    and areas needing attention, with course/task names, dates, and reported marks.
 3. Specific next steps for parental support and encouragement.
 
-A final **New messages** section summarizes every newly captured message, plus
-substantively updated messages labeled as updates. Routine and shared notices are
+A final **New messages** section summarizes every qualifying newly captured message
+not already covered by the supplied previous email, plus substantively updated
+messages labeled as updates. Routine and shared notices are
 included, with original dates, senders, requests, and deadlines. Read-state changes
 alone are not new messages. Shared notices are not automatically attributed to a
 child. Missing assignments and messages must not be dropped to meet the normal
@@ -881,7 +919,7 @@ reported input errors. Evidence arrays and model SMS drafts are not emailed.
 Malformed or unrecognized structured responses fail with `INVALID_REPORT_FORMAT`
 before the email provider is called; the original saved response is unchanged.
 Old reports retain their original wording/length, so generating a new report after
-the Azure prompt update is required for the new three-paragraph analysis.
+the Azure prompt update is required for the change-focused daily analysis.
 
 This formatting validation is not source-grounded fact-checking of AI conclusions.
 The CLI still returns structured JSON for programmatic use; that JSON is not the
@@ -1506,6 +1544,7 @@ infer removals or changes; `Review` maintains its own conservative derived histo
 - `review_evaluations`: encrypted, append-only priority/coverage snapshots with policy and evidence references.
 - `agent_reports`: encrypted, append-only AI responses with source and student metadata.
 - `report_checkpoints`: encrypted successful-batch input hashes and saved-report references for skipping unchanged AI calls.
+- `email_communications`: encrypted latest provider-accepted report/no-change email content per exact student scope, used as context for later analyses.
 
 Migrations 001 through 009 run transactionally. Existing version-1 through version-8 databases upgrade
 on open after key verification. Unknown future schema versions are rejected.

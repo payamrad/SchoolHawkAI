@@ -1,13 +1,14 @@
 import { randomBytes } from "node:crypto";
 import { parseArgs } from "node:util";
 import {
-  CommunicationError, ReportCommunicator, communicationMessageSchema, prepareNoChangeNotice, readReportRecipients,
-  type CommunicationChannelName, type CommunicationChannels, type CommunicationReceipt, type NoChangeNotice, type ReportRecipients,
+  CommunicationError, ReportCommunicator, communicationMessageSchema, prepareEmailReport, prepareNoChangeNotice, prepareSmsReport, readReportRecipients,
+  type CommunicationChannelName, type CommunicationChannels, type CommunicationMessage, type CommunicationReceipt, type EmailMessage, type NoChangeNotice, type ReportRecipients,
 } from "@schoolhawk/communication";
 import { createBrevoEmailChannelFromEnv } from "@schoolhawk/communication/brevo";
 import { createTwilioSmsChannelFromEnv } from "@schoolhawk/communication/twilio";
 import { agentReportIdSchema, type StoredAgentReport } from "@schoolhawk/core/agent-reports";
 import { withReviewStore } from "@schoolhawk/storage/review-sqlite";
+import { AgentReportStorageError, type AgentReportStore } from "@schoolhawk/storage/agent-reports";
 import { DiagnosticLogError } from "@schoolhawk/core/diagnostics";
 
 const HELP = `Report delivery: Brevo email and Twilio SMS (explicit external transmission)
@@ -72,29 +73,44 @@ export function prepareReportDelivery(
   return { recipients, communicator: new ReportCommunicator(createChannelsFromEnv(environment, channels)) };
 }
 
-export async function deliverReport(report: StoredAgentReport, plan: ReportDeliveryPlan): Promise<ReportDeliveryResult> {
+export async function deliverReport(report: StoredAgentReport, plan: ReportDeliveryPlan, store: AgentReportStore): Promise<ReportDeliveryResult> {
   return deliverToRecipients(report.reportId, plan, (channel, to) => channel === "email"
-    ? plan.communicator.sendEmail(report, to) : plan.communicator.sendSms(report, to));
+    ? prepareEmailReport(report, to) : prepareSmsReport(report, to), (message, receipt) => {
+    store.saveEmailCommunication({ reportId: report.reportId, studentRefs: report.studentRefs, kind: "report",
+      acceptedAt: receipt.acceptedAt, subject: message.subject, text: message.text });
+  });
 }
 
-export async function deliverNoChangeNotice(notice: NoChangeNotice, plan: ReportDeliveryPlan): Promise<ReportDeliveryResult> {
+export async function deliverNoChangeNotice(notice: NoChangeNotice, plan: ReportDeliveryPlan,
+  store: AgentReportStore, previousReports: StoredAgentReport[]): Promise<ReportDeliveryResult> {
   return deliverToRecipients(notice.reportId, plan, (channel, to) =>
-    plan.communicator.sendPrepared(prepareNoChangeNotice(notice, channel, to)));
+    prepareNoChangeNotice(notice, channel, to), (message, receipt) => {
+    for (const report of previousReports) {
+      store.saveEmailCommunication({ reportId: report.reportId, studentRefs: report.studentRefs, kind: "no-change",
+        acceptedAt: receipt.acceptedAt, subject: message.subject, text: message.text });
+    }
+  });
 }
 
 async function deliverToRecipients(reportId: string, plan: ReportDeliveryPlan,
-  send: (channel: CommunicationChannelName, to: string) => Promise<CommunicationReceipt>): Promise<ReportDeliveryResult> {
+  prepare: (channel: CommunicationChannelName, to: string) => CommunicationMessage,
+  recordEmail: (message: EmailMessage, receipt: CommunicationReceipt) => void): Promise<ReportDeliveryResult> {
   const targets = [
     ...plan.recipients.email.map(to => ({ channel: "email" as const, to })),
     ...plan.recipients.sms.map(to => ({ channel: "sms" as const, to })),
   ];
-  const outcomes = await Promise.allSettled(targets.map(async target => send(target.channel, target.to)));
+  const outcomes = await Promise.allSettled(targets.map(async target => {
+    const message = prepare(target.channel, target.to);
+    const receipt = await plan.communicator.sendPrepared(message);
+    if (message.channel === "email") recordEmail(message, receipt);
+    return receipt;
+  }));
   const accepted: CommunicationReceipt[] = [];
   const failed: ReportDeliveryResult["failed"] = [];
   for (const [index, outcome] of outcomes.entries()) {
     if (outcome.status === "fulfilled") accepted.push(outcome.value);
     else {
-      if (outcome.reason instanceof DiagnosticLogError) throw outcome.reason;
+      if (outcome.reason instanceof DiagnosticLogError || outcome.reason instanceof AgentReportStorageError) throw outcome.reason;
       const error = outcome.reason instanceof CommunicationError ? outcome.reason : new CommunicationError("PROVIDER_FAILED");
       failed.push({ ...targets[index], code: error.code, outcome: error.outcome });
     }
@@ -148,10 +164,12 @@ export async function runCommunicationCli(args: string[], root: string, environm
     return;
   }
   const plan = prepareReportDelivery(environment, input.channel);
-  const report = await withReviewStore(root, store => store.getAgentReport(input.reportId));
-  if (!report) throw new CommunicationUsageError("No saved AI report matches this ID. Use Agent reports to select a report.");
-  console.error("COMMUNICATION: Sending the saved AI report to the configured private recipient lists.");
-  const result = await deliverReport(report, plan);
-  console.log(JSON.stringify(result, null, 2));
-  if (result.status !== "accepted") throw new ReportDeliveryError(result);
+  await withReviewStore(root, async store => {
+    const report = store.getAgentReport(input.reportId);
+    if (!report) throw new CommunicationUsageError("No saved AI report matches this ID. Use Agent reports to select a report.");
+    console.error("COMMUNICATION: Sending the saved AI report to the configured private recipient lists.");
+    const result = await deliverReport(report, plan, store);
+    console.log(JSON.stringify(result, null, 2));
+    if (result.status !== "accepted") throw new ReportDeliveryError(result);
+  });
 }

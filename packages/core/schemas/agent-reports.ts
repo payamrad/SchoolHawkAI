@@ -3,8 +3,27 @@ import { reviewIdSchema, reviewTimestamp } from "../review";
 import { studentSnapshotSchema } from "./student-snapshot";
 
 export const MAX_AGENT_RESPONSE_BYTES = 1024 * 1024;
+export const MAX_EMAIL_BODY_BYTES = MAX_AGENT_RESPONSE_BYTES + 8192;
 export const agentReportIdSchema = z.string().regex(/^report_[a-f0-9]{64}$/);
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+
+export const emailCommunicationSchema = z.object({
+  reportId: agentReportIdSchema,
+  studentRefs: z.array(reviewIdSchema).max(2000)
+    .refine(values => new Set(values).size === values.length),
+  kind: z.enum(["report", "no-change"]),
+  acceptedAt: reviewTimestamp,
+  subject: z.string().min(1).max(200).regex(/^[^\r\n]+$/),
+  text: z.string().min(1).refine(value =>
+    value.trim().length > 0 && Buffer.byteLength(value, "utf8") <= MAX_EMAIL_BODY_BYTES),
+}).strict();
+export type EmailCommunication = z.infer<typeof emailCommunicationSchema>;
+
+export const previousCommunicationSchema = z.object({
+  latestEmail: emailCommunicationSchema,
+  latestReportEmail: emailCommunicationSchema.extend({ kind: z.literal("report") }).optional(),
+}).strict();
+export type PreviousCommunication = z.infer<typeof previousCommunicationSchema>;
 
 export const agentReplySchema = z.object({
   provider: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),

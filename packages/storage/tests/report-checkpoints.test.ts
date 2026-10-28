@@ -60,7 +60,7 @@ test("version-8 upgrades preserve AI reports and start without a guessed checkpo
     store.close();
     const connection = new Database(file);
     try {
-      connection.exec("DROP TABLE report_checkpoints; PRAGMA user_version = 8;");
+      connection.exec("DROP TABLE email_communications; DROP TABLE report_checkpoints; PRAGMA user_version = 8;");
       withDiagnosticSink(() => {}, () => assert.throws(() => new SqliteReviewStore(file, randomBytes(32)), /Incorrect storage key/));
       assert.equal(connection.pragma("user_version", { simple: true }), 8);
     } finally { connection.close(); }

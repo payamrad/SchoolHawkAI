@@ -1,14 +1,14 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
-  agentReportIdSchema, MAX_AGENT_RESPONSE_BYTES, storedAgentReportSchema, type StoredAgentReport,
+  agentReportIdSchema, MAX_EMAIL_BODY_BYTES, storedAgentReportSchema, type StoredAgentReport,
 } from "@schoolhawk/core/agent-reports";
 import { reviewTimestamp } from "@schoolhawk/core/review";
 import { DiagnosticLogError, reportDiagnostic } from "@schoolhawk/core/diagnostics";
 
 export type CommunicationChannelName = "email" | "sms";
 export const MAX_SMS_CHARACTERS = 160;
-export const MAX_EMAIL_BODY_BYTES = MAX_AGENT_RESPONSE_BYTES + 8192;
+export { MAX_EMAIL_BODY_BYTES } from "@schoolhawk/core/agent-reports";
 export const emailAddressSchema = z.string().trim().pipe(z.email()).refine(value => value.length <= 254);
 export const phoneNumberSchema = z.string().trim().regex(/^\+[1-9]\d{1,14}$/);
 const messageBase = {
@@ -69,7 +69,7 @@ const failures = {
   CONFIGURATION: { outcome: "not-sent", message: "Invalid communication configuration. Check channel adapters and the request timeout." },
   CHANNEL_NOT_CONFIGURED: { outcome: "not-sent", message: "The requested communication channel is not configured. Supply its provider adapter first." },
   INVALID_REPORT: { outcome: "not-sent", message: "Communication requires a valid saved AI report. No message was sent." },
-  INVALID_REPORT_FORMAT: { outcome: "not-sent", message: "The saved AI response is not readable report text or a matching legacy email report. Update the Azure agent with Prompt.txt and generate a new report. No email was sent; the original response remains saved." },
+  INVALID_REPORT_FORMAT: { outcome: "not-sent", message: "The saved AI response is not readable report text or a matching legacy email report. Update the Azure agent with SamplePrompt.txt and generate a new report. No email was sent; the original response remains saved." },
   STUDENT_NAMES_MISSING: { outcome: "not-sent", message: "The saved AI report does not contain student names. Generate a new named report before emailing it." },
   INVALID_RECIPIENT: { outcome: "not-sent", message: "Provide one valid email address or an international E.164 phone number for the selected channel. No message was sent." },
   INVALID_MESSAGE: { outcome: "not-sent", message: "The prepared communication message is invalid or oversized. No content was silently truncated and no message was sent." },

@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { SqliteReviewStore } from "@schoolhawk/storage/review-sqlite";
+import { type PreviousCommunication } from "@schoolhawk/core/agent-reports";
+import { studentSnapshotSchema, type StudentSnapshot } from "@schoolhawk/core/student-snapshot";
 import { environment, foundryResponse, studentReportFixture, studentReportHistoryFixture } from "../../../packages/agent/tests/fixtures";
 import { brevoEnvironment, twilioEnvironment, twilioReceipt } from "../../../packages/communication/tests/fixtures";
 import { setupDatabase } from "../../../scripts/setup-database";
@@ -15,6 +17,7 @@ function fixture(context: TestContext) {
   const root = mkdtempSync(path.join(tmpdir(), "schoolhawk-report-cache-"));
   const output: string[] = [];
   const sent: { subject?: string; text: string }[] = [];
+  const aiInputs: { snapshot: StudentSnapshot; previousCommunication?: PreviousCommunication }[] = [];
   const state = { ai: 0, aiFailures: 0, deliveryFails: false };
   context.mock.method(console, "log", (value: string) => output.push(value));
   context.mock.method(console, "error", () => {});
@@ -22,6 +25,9 @@ function fixture(context: TestContext) {
     const sms = String(url).startsWith("https://api.twilio.com/");
     const body = sms ? Object.fromEntries(new URLSearchParams(String(options.body))) : JSON.parse(String(options.body));
     if (String(url).includes(".services.ai.azure.com/")) {
+      const input = JSON.parse(body.input[0].content[0].text);
+      aiInputs.push({ snapshot: studentSnapshotSchema.parse(input.snapshot ?? input),
+        previousCommunication: input.previousCommunication });
       state.ai++;
       if (state.aiFailures > 0) { state.aiFailures--; return new Response("{}", { status: 503 }); }
       return new Response(JSON.stringify({ ...foundryResponse("A parent-friendly academic summary."), id: `resp_${state.ai}` }));
@@ -52,7 +58,7 @@ function fixture(context: TestContext) {
   const saveInput = () => writeFileSync(path.join(root, "report.json"), JSON.stringify(snapshot), { mode: 0o600 });
   saveInput();
   return {
-    root, output, sent, state, family, snapshot, saveInput, withStore,
+    root, output, sent, aiInputs, state, family, snapshot, saveInput, withStore,
     env: { ...environment, ...brevoEnvironment, REPORT_SMS_RECIPIENTS: "" },
     last: () => JSON.parse(output.at(-1)!),
     close: () => rmSync(root, { recursive: true, force: true }),
@@ -95,6 +101,59 @@ test("unchanged per-student input skips all Azure calls across reopened stores a
     assert.equal(f.last().kind, "student-report-batch");
     await runAgentCli([...args, "--force"], f.root, f.env);
     assert.equal(f.state.ai, 6, "Explicit forcing bypasses the unchanged-input cache.");
+  } finally { f.close(); }
+});
+
+test("analysis uses accepted email content, not drafts or failed sends, and retains full context after a no-change notice", async context => {
+  const f = fixture(context);
+  const args = ["analyze", "--report", "report.json"];
+  try {
+    await runAgentCli(args, f.root, f.env);
+    await runAgentCli([...args, "--force", "--notify"], f.root, f.env);
+    assert.equal(f.aiInputs[0].previousCommunication, undefined);
+    assert.equal(f.aiInputs[1].previousCommunication, undefined, "A saved draft is not prior communication.");
+    const reportEmail = f.sent[0];
+    await runAgentCli([...args, "--force"], f.root, f.env);
+    assert.deepEqual(f.aiInputs[2].previousCommunication?.latestEmail.text, reportEmail.text);
+    assert.equal(f.aiInputs[2].previousCommunication?.latestEmail.subject, reportEmail.subject);
+    assert.equal(f.sent.length, 1, "Local analysis reads history but does not send anything.");
+
+    f.state.deliveryFails = true;
+    await assert.rejects(runAgentCli([...args, "--force", "--notify"], f.root, f.env), ReportDeliveryError);
+    f.state.deliveryFails = false;
+    await runAgentCli([...args, "--force"], f.root, f.env);
+    assert.equal(f.aiInputs[4].previousCommunication?.latestEmail.reportId,
+      f.aiInputs[2].previousCommunication?.latestEmail.reportId, "Uncertain sends do not replace accepted email history.");
+    await runAgentCli([...args, "--notify"], f.root, f.env);
+    assert.equal(f.state.ai, 5, "Sending a no-change notice still skips the AI.");
+    const notice = f.sent.at(-1)!;
+    await runAgentCli([...args, "--force"], f.root, f.env);
+    const prior = f.aiInputs[5].previousCommunication!;
+    assert.equal(prior.latestEmail.kind, "no-change");
+    assert.equal(prior.latestEmail.text, notice.text);
+    assert.equal(prior.latestReportEmail?.text, reportEmail.text);
+    assert.equal(prior.latestReportEmail?.kind, "report");
+    assert.equal(Object.hasOwn(prior.latestEmail, "to"), false);
+  } finally { f.close(); }
+});
+
+test("per-student regeneration sends only each child's accepted email and scopes shared no-change notices independently", async context => {
+  const f = fixture(context);
+  const args = ["analyze", "--config", "review.json", "--per-student", "--notify"];
+  try {
+    await runAgentCli(args, f.root, f.env);
+    const initialEmails = f.sent.slice();
+    await runAgentCli(args, f.root, f.env);
+    await runAgentCli([...args, "--force"], f.root, f.env);
+    for (const [index, input] of f.aiInputs.slice(2).entries()) {
+      assert.deepEqual(input.previousCommunication?.latestEmail.studentRefs,
+        input.snapshot.students.map(student => student.id));
+      assert.deepEqual(input.previousCommunication?.latestReportEmail?.studentRefs,
+        input.snapshot.students.map(student => student.id));
+      assert.equal(input.previousCommunication?.latestEmail.kind, "no-change");
+      assert.equal(input.previousCommunication?.latestReportEmail?.text, initialEmails[index].text);
+    }
+    assert.equal(f.withStore(store => store.getPreviousCommunication(f.snapshot.students.map(student => student.id))), undefined);
   } finally { f.close(); }
 });
 
